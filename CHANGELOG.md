@@ -12,7 +12,6 @@ public release is tagged.
 - An adoption-led public roadmap with explicit milestones and non-goals.
 - OIDC-based TestPyPI/PyPI publication and multi-platform GHCR release workflows with provenance and
   SBOM attestations.
-- A repository social-preview asset aligned with the governed question-to-SQL workflow.
 
 ### Changed
 
