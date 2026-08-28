@@ -1,0 +1,124 @@
+name: Publish Python package
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Build and attest only, or publish the current version to TestPyPI
+        required: true
+        type: choice
+        default: build-only
+        options:
+          - build-only
+          - testpypi
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-python-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+
+    steps:
+      - name: Check out the release source
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install packaging tools
+        run: python -m pip install --upgrade pip build "twine>=6,<8"
+
+      - name: Verify release tag matches package version
+        if: github.event_name == 'release'
+        shell: bash
+        run: |
+          package_version="$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+          release_version="${GITHUB_REF_NAME#v}"
+          test "$package_version" = "$release_version" || {
+            echo "pyproject.toml version $package_version does not match release tag $GITHUB_REF_NAME" >&2
+            exit 1
+          }
+
+      - name: Build distributions
+        run: python -m build
+
+      - name: Validate distribution metadata
+        run: python -m twine check dist/*
+
+      - name: Attest distributions
+        uses: actions/attest@v4
+        with:
+          subject-path: dist/*
+
+      - name: Upload distributions for the publish job
+        uses: actions/upload-artifact@v7
+        with:
+          name: python-distributions
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish-testpypi:
+    if: >-
+      (github.event_name == 'workflow_dispatch' && inputs.target == 'testpypi') ||
+      (github.event_name == 'release' && github.event.release.prerelease)
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/p/sqlverity-platform
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@v7
+        with:
+          name: python-distributions
+          path: dist/
+
+      - name: Publish to TestPyPI with Trusted Publishing
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+
+  publish-pypi:
+    if: github.event_name == 'release' && !github.event.release.prerelease
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: pypi
+      url: https://pypi.org/p/sqlverity-platform
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@v7
+        with:
+          name: python-distributions
+          path: dist/
+
+      - name: Publish to PyPI with Trusted Publishing
+        uses: pypa/gh-action-pypi-publish@release/v1

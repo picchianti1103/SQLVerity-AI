@@ -1,7 +1,7 @@
 # Open-source readiness
 
-SQLVerity AI is being prepared for publication as a `0.1.x` developer preview. This checklist separates
-repository hygiene from production certification; completing the first does not imply the second.
+SQLVerity AI is public as a `0.1.x` developer preview. This checklist separates repository hygiene,
+artifact distribution, and production certification; completing one does not imply the next.
 
 ## Delivered in the release-preparation pass
 
@@ -27,27 +27,28 @@ repository hygiene from production certification; completing the first does not 
 - The exact sanitized public root passed Gitleaks with one commit and no findings. The resolved core
   dependency graph has no known vulnerabilities, and the direct dependency-license inventory was
   reviewed locally.
-- The local `v0.1.0` tag is prepared against the sanitized public root and remains unpublished until
-  hosted CI passes.
+- The `v0.1.0` developer-preview release is published from the sanitized public root after hosted CI
+  passed.
 - The MariaDB dialect and adapter remain implemented, but the packaging extra is withheld until the
   upstream Python distribution publishes a release that resolves `PYSEC-2026-217`.
 - The canonical repository URL is `https://github.com/picchianti1103/SQLVerity-AI`.
 - The README identifies the developer-preview status, core workflow, product boundaries, and known
   non-goals before the detailed delivery history.
 
-## Required before making the repository public
+## Completed for public repository launch
 
-- Confirm ownership and publication rights for all source code, fixtures, ADRs, and bundled assets.
-- Create the new repository from the sanitized root commit, enable private vulnerability reporting,
-  and verify that issue, pull-request, and security links resolve correctly.
-- Run CI on hosted Linux/amd64, require its checks on the default branch, and verify the hardened
-  container smoke test.
-- Publish the prepared `v0.1.0` tag only after hosted CI passes on the exact public root commit.
+- Ownership and publication rights were reviewed for source code, fixtures, ADRs, and bundled assets.
+- The public repository was created from the sanitized root; private vulnerability reporting and
+  repository security features are enabled.
+- Hosted Linux CI and the hardened container smoke test pass and are required on the default branch.
+- The `v0.1.0` tag and developer-preview release point to the sanitized public history.
 
 ## Required before distributing release artifacts
 
-- Generate and review an SBOM for the exact image, wheel, and source distribution.
-- Sign published artifacts and document the verification command.
+- Configure the repository environments and PyPI/TestPyPI Trusted Publishers described in
+  [the release process](releasing.md).
+- Run the release workflows and review the generated provenance and SBOM attestations for the exact
+  image, wheel, and source distribution.
 - If an image is published for more than one architecture, run the smoke test on every advertised
   architecture, including Linux/arm64.
 

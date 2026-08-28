@@ -1,0 +1,60 @@
+name: Early-adopter feedback
+description: Share a concrete evaluation, blocked workflow, or pilot use case without sensitive data.
+title: "[Feedback]: "
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        Thank you for testing SQLVerity AI. Use synthetic or approved metadata only. Do not include
+        credentials, private schemas, prompts, result rows, personal data, or vulnerability details.
+  - type: dropdown
+    id: stage
+    attributes:
+      label: Furthest stage reached
+      options:
+        - Application started
+        - Demo catalog inspected
+        - AI transfer preflight reviewed
+        - SQL proposal generated
+        - Database plan inspected
+        - Read-only result executed
+        - Evaluating a pilot
+    validations:
+      required: true
+  - type: input
+    id: time_to_catalog
+    attributes:
+      label: Time to first inspected catalog
+      placeholder: e.g. 12 minutes, or blocked
+  - type: textarea
+    id: use_case
+    attributes:
+      label: User and problem
+      description: Who needs this, what are they trying to learn, and why are current tools insufficient?
+    validations:
+      required: true
+  - type: textarea
+    id: trust_break
+    attributes:
+      label: First point of friction or distrust
+      description: What was unclear, blocked, surprising, or too risky to continue?
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Non-sensitive environment
+      description: OS, installation path, database dialect, provider kind, and approximate schema size.
+  - type: textarea
+    id: pilot
+    attributes:
+      label: Pilot success criteria
+      description: What measurable outcome would justify a four-week pilot?
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Data safety
+      options:
+        - label: I removed credentials, private data, and vulnerability details.
+          required: true
