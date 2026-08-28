@@ -1,0 +1,87 @@
+name: Disaster recovery drill
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "23 3 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  postgresql-restore-drill:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: sqlverity_source
+          POSTGRES_USER: sqlverity
+          POSTGRES_PASSWORD: drill-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U sqlverity -d sqlverity_source"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      SQLVERITY_CATALOG_BACKEND: postgresql
+      SQLVERITY_CATALOG_SECRET_REF: env://SQLVERITY_SOURCE_DB
+      SQLVERITY_SECRET_BACKENDS: environment
+      SQLVERITY_SOURCE_DB: >-
+        {"host":"127.0.0.1","port":5432,"database":"sqlverity_source","username":"sqlverity","password":"drill-password","sslmode":"disable"}
+      SQLVERITY_DRILL_DB: >-
+        {"host":"127.0.0.1","port":5432,"database":"sqlverity_drill","username":"sqlverity","password":"drill-password","sslmode":"disable"}
+      PGPASSWORD: drill-password
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install PostgreSQL 17 client tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes curl ca-certificates
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl --fail \
+            --output /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+            https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          printf '%s\n' \
+            'Types: deb' \
+            'URIs: https://apt.postgresql.org/pub/repos/apt' \
+            'Suites: noble-pgdg' \
+            'Components: main' \
+            'Signed-By: /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc' \
+            | sudo tee /etc/apt/sources.list.d/pgdg.sources >/dev/null
+          sudo apt-get update
+          sudo apt-get install --yes postgresql-client-17
+          echo "/usr/lib/postgresql/17/bin" >> "$GITHUB_PATH"
+          /usr/lib/postgresql/17/bin/pg_dump --version
+      - name: Install catalog dependencies
+        run: python -m pip install -e ".[postgres]"
+      - name: Seed source catalog
+        run: >-
+          python -c "from packages.catalog.sqlverity_catalog.repository import PostgreSQLCatalogRepository;
+          from packages.connectors.sqlverity_connectors.connection import load_secret_resolver_from_environment;
+          s=load_secret_resolver_from_environment().resolve_postgresql('env://SQLVERITY_SOURCE_DB');
+          r=PostgreSQLCatalogRepository(s.as_connect_kwargs(application_name='dr-seed'));
+          r.initialize(); r.create_tenant('DR evidence tenant'); r.close()"
+      - name: Create isolated drill database
+        run: createdb --host 127.0.0.1 --username sqlverity sqlverity_drill
+      - name: Back up source catalog
+        run: sqlverity-catalog-admin backup --output "${{ runner.temp }}/catalog.dump"
+      - name: Restore and verify isolated target
+        run: >-
+          sqlverity-catalog-admin drill
+          --backup "${{ runner.temp }}/catalog.dump"
+          --target-secret-ref env://SQLVERITY_DRILL_DB
+          | tee "${{ runner.temp }}/drill-report.json"
+      - uses: actions/upload-artifact@v6
+        with:
+          name: disaster-recovery-drill-report
+          path: ${{ runner.temp }}/drill-report.json
+          retention-days: 30

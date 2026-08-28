@@ -1,0 +1,119 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sqlverity-platform"
+version = "0.1.0"
+description = "Governed, explainable natural-language to SQL platform"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "Apache-2.0"
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]
+keywords = ["ai", "governance", "natural-language", "sql", "text-to-sql"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Framework :: FastAPI",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Database",
+]
+dependencies = [
+  "fastapi",
+  "httpx>=0.27,<1",
+  "pydantic>=2",
+  "sqlglot>=30,<31",
+  "uvicorn[standard]",
+]
+
+[project.scripts]
+sqlverity-golden = "packages.evaluation.sqlverity_evaluation.cli:main"
+sqlverity-catalog-admin = "packages.catalog.sqlverity_catalog.backup:main"
+sqlverity-live-certify = "packages.evaluation.sqlverity_evaluation.live_cli:main"
+sqlverity-retention = "packages.operations.sqlverity_operations.retention:main"
+sqlverity-load-test = "packages.evaluation.sqlverity_evaluation.load_cli:main"
+
+[project.urls]
+Homepage = "https://github.com/picchianti1103/SQLVerity-AI"
+Repository = "https://github.com/picchianti1103/SQLVerity-AI"
+Issues = "https://github.com/picchianti1103/SQLVerity-AI/issues"
+Changelog = "https://github.com/picchianti1103/SQLVerity-AI/blob/main/CHANGELOG.md"
+
+[project.optional-dependencies]
+postgres = [
+  "psycopg[binary]>=3,<4",
+  "psycopg-pool>=3,<4",
+]
+mysql = [
+  "mysql-connector-python>=9.2,<10",
+]
+oracle = [
+  "oracledb>=4,<5",
+]
+sqlserver = [
+  "mssql-python>=1.11,<2",
+]
+openai = [
+  "openai>=2,<3",
+]
+identity = [
+  "PyJWT[crypto]>=2.10,<3",
+]
+secrets = [
+  "boto3>=1.40,<2",
+]
+observability = [
+  "opentelemetry-api>=1.30,<2",
+  "opentelemetry-exporter-otlp-proto-http>=1.30,<2",
+  "opentelemetry-sdk>=1.30,<2",
+]
+all = [
+  "boto3>=1.40,<2",
+  "mssql-python>=1.11,<2",
+  "mysql-connector-python>=9.2,<10",
+  "openai>=2,<3",
+  "opentelemetry-api>=1.30,<2",
+  "opentelemetry-exporter-otlp-proto-http>=1.30,<2",
+  "opentelemetry-sdk>=1.30,<2",
+  "PyJWT[crypto]>=2.10,<3",
+  "oracledb>=4,<5",
+  "psycopg[binary]>=3,<4",
+  "psycopg-pool>=3,<4",
+]
+dev = [
+  "boto3>=1.40,<2",
+  "build>=1,<2",
+  "mypy",
+  "mysql-connector-python>=9.2,<10",
+  "openai>=2,<3",
+  "opentelemetry-api>=1.30,<2",
+  "opentelemetry-exporter-otlp-proto-http>=1.30,<2",
+  "opentelemetry-sdk>=1.30,<2",
+  "pip-audit>=2,<3",
+  "pip-licenses>=5,<6",
+  "PyJWT[crypto]>=2.10,<3",
+  "psycopg[binary]>=3,<4",
+  "psycopg-pool>=3,<4",
+  "pytest",
+  "ruff",
+  "twine>=6,<7",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["apps*", "migrations*", "packages*"]
+
+[tool.setuptools.package-data]
+"apps.web" = ["*.html", "assets/*.css", "assets/*.js"]
+"migrations.postgresql" = ["*.sql"]
+"packages.catalog.sqlverity_catalog" = ["*.sql"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true

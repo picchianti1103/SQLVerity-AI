@@ -1,0 +1,82 @@
+name: Live certification
+
+on:
+  workflow_dispatch:
+    inputs:
+      providers:
+        description: Comma-separated providers to call (blank skips billable provider tests)
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  postgresql:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: sqlverity_live
+          POSTGRES_USER: sqlverity
+          POSTGRES_PASSWORD: live-test-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U sqlverity -d sqlverity_live"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      SQLVERITY_SECRET_BACKENDS: environment
+      SQLVERITY_LIVE_POSTGRES_SECRET_REF: env://SQLVERITY_LIVE_POSTGRES
+      SQLVERITY_LIVE_POSTGRES: >-
+        {"host":"127.0.0.1","port":5432,"database":"sqlverity_live","username":"sqlverity","password":"live-test-password","sslmode":"disable"}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install PostgreSQL test dependencies
+        run: python -m pip install -e ".[postgres]" pytest
+      - name: Load deterministic golden fixture
+        env:
+          PGPASSWORD: live-test-password
+        run: >-
+          psql --host 127.0.0.1 --username sqlverity --dbname sqlverity_live
+          --set ON_ERROR_STOP=1 --file fixtures/live/postgresql_golden.sql
+      - name: Run real catalog, introspection, EXPLAIN, and execution tests
+        run: python -m pytest -q tests/live/test_postgresql_live.py
+
+  providers:
+    if: inputs.providers != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: live-certification
+    env:
+      SQLVERITY_RUN_LIVE_PROVIDER_TESTS: "true"
+      SQLVERITY_LLM_PROVIDERS: ${{ inputs.providers }}
+      OPENAI_API_KEY: ${{ secrets.SQLVERITY_LIVE_OPENAI_API_KEY }}
+      SQLVERITY_OPENAI_MODEL: ${{ secrets.SQLVERITY_LIVE_OPENAI_MODEL }}
+      ANTHROPIC_API_KEY: ${{ secrets.SQLVERITY_LIVE_ANTHROPIC_API_KEY }}
+      SQLVERITY_ANTHROPIC_MODEL: ${{ secrets.SQLVERITY_LIVE_ANTHROPIC_MODEL }}
+      GEMINI_API_KEY: ${{ secrets.SQLVERITY_LIVE_GEMINI_API_KEY }}
+      SQLVERITY_GEMINI_MODEL: ${{ secrets.SQLVERITY_LIVE_GEMINI_MODEL }}
+      MOONSHOT_API_KEY: ${{ secrets.SQLVERITY_LIVE_KIMI_API_KEY }}
+      SQLVERITY_KIMI_MODEL: ${{ secrets.SQLVERITY_LIVE_KIMI_MODEL }}
+      SQLVERITY_PROVIDER_HTTP_MAX_ATTEMPTS: "2"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install provider test dependencies
+        run: python -m pip install -e ".[openai]" pytest
+      - name: Call each explicitly selected real provider once
+        run: python -m pytest -q tests/live/test_llm_providers_live.py

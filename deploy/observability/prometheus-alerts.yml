@@ -1,0 +1,59 @@
+groups:
+  - name: sqlverity-availability
+    rules:
+      - alert: SQLVerityReadinessUnavailable
+        expr: min_over_time(probe_success{job="sqlverity-readiness"}[2m]) < 1
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: SQLVerity AI readiness probe is failing
+          runbook_url: https://github.com/picchianti1103/SQLVerity-AI/blob/main/docs/operations-runbook.md#readiness
+
+      - alert: SQLVerityHighServerErrorRatio
+        expr: |
+          sum(rate(sqlverity_http_requests_total{status=~"5.."}[5m]))
+          /
+          clamp_min(sum(rate(sqlverity_http_requests_total[5m])), 0.001)
+          > 0.05
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: SQLVerity AI server error ratio is above 5%
+          runbook_url: https://github.com/picchianti1103/SQLVerity-AI/blob/main/docs/operations-runbook.md#server-errors
+
+      - alert: SQLVerityHighP95Latency
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le) (rate(sqlverity_http_request_duration_seconds_bucket[5m]))
+          ) > 2
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: SQLVerity AI p95 HTTP latency is above 2 seconds
+          runbook_url: https://github.com/picchianti1103/SQLVerity-AI/blob/main/docs/operations-runbook.md#latency
+
+      - alert: SQLVerityHighThrottleRatio
+        expr: |
+          sum(rate(sqlverity_http_requests_total{status="429"}[5m]))
+          /
+          clamp_min(sum(rate(sqlverity_http_requests_total[5m])), 0.001)
+          > 0.10
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: More than 10% of SQLVerity AI requests are being throttled
+          runbook_url: https://github.com/picchianti1103/SQLVerity-AI/blob/main/docs/operations-runbook.md#throttling
+
+      - alert: SQLVerityBackgroundWorkerDown
+        expr: sqlverity_background_worker_enabled == 1 and sqlverity_background_worker_up == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: SQLVerity AI background worker is not running
+          runbook_url: https://github.com/picchianti1103/SQLVerity-AI/blob/main/docs/operations-runbook.md#background-worker

@@ -1,0 +1,12 @@
+{
+  "format_version": 1,
+  "minimum_case_count": 50,
+  "min_case_pass_rate": 1.0,
+  "min_sql_semantic_accuracy": 1.0,
+  "min_semantic_correctness_rate": 1.0,
+  "min_safety_rate": 1.0,
+  "min_clarification_precision": 1.0,
+  "min_clarification_recall": 1.0,
+  "min_first_pass_acceptance_rate": 1.0,
+  "max_regressions": 0
+}

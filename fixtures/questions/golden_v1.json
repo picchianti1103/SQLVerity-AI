@@ -1,0 +1,338 @@
+{
+  "format_version": 1,
+  "dataset_id": "sqlverity-mvp-golden",
+  "version": 1,
+  "dialect": "postgresql",
+  "minimum_case_count": 50,
+  "contexts": {
+    "commerce": {
+      "allowed_tables": ["commerce.customers", "commerce.orders", "commerce.order_items", "commerce.products"],
+      "allowed_columns": [
+        "commerce.customers.id", "commerce.customers.country", "commerce.customers.status", "commerce.customers.created_at",
+        "commerce.orders.id", "commerce.orders.customer_id", "commerce.orders.status", "commerce.orders.ordered_at", "commerce.orders.total_amount", "commerce.orders.net_amount",
+        "commerce.order_items.order_id", "commerce.order_items.product_id", "commerce.order_items.quantity", "commerce.order_items.net_amount",
+        "commerce.products.id", "commerce.products.category", "commerce.products.active"
+      ]
+    },
+    "finance": {
+      "allowed_tables": ["finance.invoices", "finance.invoice_lines", "finance.payments", "finance.accounts"],
+      "allowed_columns": [
+        "finance.invoices.id", "finance.invoices.customer_id", "finance.invoices.status", "finance.invoices.invoice_date", "finance.invoices.net_amount",
+        "finance.invoice_lines.invoice_id", "finance.invoice_lines.product_id", "finance.invoice_lines.net_amount",
+        "finance.payments.id", "finance.payments.invoice_id", "finance.payments.status", "finance.payments.paid_at", "finance.payments.amount",
+        "finance.accounts.id", "finance.accounts.region", "finance.accounts.active"
+      ]
+    },
+    "support": {
+      "allowed_tables": ["support.tickets", "support.ticket_events", "support.agents", "support.satisfaction"],
+      "allowed_columns": [
+        "support.tickets.id", "support.tickets.customer_id", "support.tickets.status", "support.tickets.priority", "support.tickets.opened_at", "support.tickets.resolved_at",
+        "support.ticket_events.ticket_id", "support.ticket_events.event_type", "support.ticket_events.occurred_at",
+        "support.agents.id", "support.agents.team", "support.agents.active",
+        "support.satisfaction.ticket_id", "support.satisfaction.score", "support.satisfaction.submitted_at"
+      ]
+    }
+  },
+  "cases": [
+    {
+      "id": "commerce_001", "category": "aggregation", "context_id": "commerce",
+      "question": "Quanti ordini sono stati creati nel 2026?", "expected_outcome": "accepted",
+      "expected_issue_codes": [], "expected_business_concepts": ["Order Count"], "accepted_sql_alternatives": [],
+      "reference": {"sql": "SELECT COUNT(*) AS order_count FROM commerce.orders WHERE ordered_at >= DATE '2026-01-01' AND ordered_at < DATE '2027-01-01'", "tables": ["commerce.orders"], "columns": ["commerce.orders.ordered_at"], "business_concepts": ["Order Count"], "ambiguities": []}
+    },
+    {
+      "id": "commerce_002", "category": "metric", "context_id": "commerce",
+      "question": "Qual è il ricavo netto degli ordini completati nel 2026?", "expected_outcome": "accepted",
+      "expected_issue_codes": [], "expected_business_concepts": ["Net Revenue"], "accepted_sql_alternatives": [],
+      "reference": {"sql": "SELECT SUM(net_amount) AS net_revenue FROM commerce.orders WHERE status = 'completed' AND ordered_at >= DATE '2026-01-01' AND ordered_at < DATE '2027-01-01'", "tables": ["commerce.orders"], "columns": ["commerce.orders.net_amount", "commerce.orders.status", "commerce.orders.ordered_at"], "business_concepts": ["Net Revenue"], "ambiguities": []}
+    },
+    {
+      "id": "commerce_003", "category": "grouping", "context_id": "commerce",
+      "question": "Quanti clienti abbiamo per paese?", "expected_outcome": "accepted",
+      "expected_issue_codes": [], "expected_business_concepts": ["Customer Count"], "accepted_sql_alternatives": [],
+      "reference": {"sql": "SELECT country, COUNT(*) AS customer_count FROM commerce.customers GROUP BY country", "tables": ["commerce.customers"], "columns": ["commerce.customers.country"], "business_concepts": ["Customer Count"], "ambiguities": []}
+    },
+    {
+      "id": "commerce_004", "category": "aggregation", "context_id": "commerce",
+      "question": "Qual è il valore medio degli ordini completati?", "expected_outcome": "accepted",
+      "expected_issue_codes": [], "expected_business_concepts": ["Average Order Value"], "accepted_sql_alternatives": [],
+      "reference": {"sql": "SELECT AVG(total_amount) AS average_order_value FROM commerce.orders WHERE status = 'completed'", "tables": ["commerce.orders"], "columns": ["commerce.orders.total_amount", "commerce.orders.status"], "business_concepts": ["Average Order Value"], "ambiguities": []}
+    },
+    {
+      "id": "commerce_005", "category": "grouping", "context_id": "commerce",
+      "question": "Quanti prodotti attivi ci sono per categoria?", "expected_outcome": "accepted",
+      "expected_issue_codes": [], "expected_business_concepts": ["Active Products"], "accepted_sql_alternatives": [],
+      "reference": {"sql": "SELECT category, COUNT(*) AS active_product_count FROM commerce.products WHERE active = TRUE GROUP BY category", "tables": ["commerce.products"], "columns": ["commerce.products.category", "commerce.products.active"], "business_concepts": ["Active Products"], "ambiguities": []}
+    },
+    {
+      "id": "commerce_006", "category": "grouping", "context_id": "commerce",
+      "question": "Qual è la quantità venduta per prodotto?", "expected_outcome": "accepted",
+      "expected_issue_codes": [], "expected_business_concepts": ["Units Sold"], "accepted_sql_alternatives": [],
+      "reference": {"sql": "SELECT product_id, SUM(quantity) AS units_sold FROM commerce.order_items GROUP BY product_id", "tables": ["commerce.order_items"], "columns": ["commerce.order_items.product_id", "commerce.order_items.quantity"], "business_concepts": ["Units Sold"], "ambiguities": []}
+    },
+    {
+      "id": "commerce_007", "category": "time_series", "context_id": "commerce",
+      "question": "Mostra i nuovi clienti per mese.", "expected_outcome": "accepted",
+      "expected_issue_codes": [], "expected_business_concepts": ["New Customers"], "accepted_sql_alternatives": [],
+      "reference": {"sql": "SELECT DATE_TRUNC('month', created_at) AS created_month, COUNT(*) AS customer_count FROM commerce.customers GROUP BY DATE_TRUNC('month', created_at)", "tables": ["commerce.customers"], "columns": ["commerce.customers.created_at"], "business_concepts": ["New Customers"], "ambiguities": []}
+    },
+    {
+      "id": "commerce_008", "category": "metric", "context_id": "commerce",
+      "question": "Quanto valgono complessivamente gli ordini cancellati?", "expected_outcome": "accepted",
+      "expected_issue_codes": [], "expected_business_concepts": ["Cancelled Order Value"], "accepted_sql_alternatives": [],
+      "reference": {"sql": "SELECT SUM(total_amount) AS cancelled_order_value FROM commerce.orders WHERE status = 'cancelled'", "tables": ["commerce.orders"], "columns": ["commerce.orders.total_amount", "commerce.orders.status"], "business_concepts": ["Cancelled Order Value"], "ambiguities": []}
+    },
+    {
+      "id": "commerce_009", "category": "join", "context_id": "commerce",
+      "question": "Quanti ordini ha effettuato ogni cliente?", "expected_outcome": "accepted",
+      "expected_issue_codes": [], "expected_business_concepts": ["Orders per Customer"], "accepted_sql_alternatives": [],
+      "reference": {"sql": "SELECT c.id AS customer_id, COUNT(o.id) AS order_count FROM commerce.customers AS c JOIN commerce.orders AS o ON o.customer_id = c.id GROUP BY c.id", "tables": ["commerce.customers", "commerce.orders"], "columns": ["commerce.customers.id", "commerce.orders.id", "commerce.orders.customer_id"], "business_concepts": ["Orders per Customer"], "ambiguities": []}
+    },
+    {
+      "id": "commerce_010", "category": "join_metric", "context_id": "commerce",
+      "question": "Qual è il ricavo netto per categoria degli ordini completati?", "expected_outcome": "accepted",
+      "expected_issue_codes": [], "expected_business_concepts": ["Category Net Revenue"], "accepted_sql_alternatives": [],
+      "reference": {"sql": "SELECT p.category, SUM(oi.net_amount) AS net_revenue FROM commerce.orders AS o JOIN commerce.order_items AS oi ON oi.order_id = o.id JOIN commerce.products AS p ON p.id = oi.product_id WHERE o.status = 'completed' GROUP BY p.category", "tables": ["commerce.orders", "commerce.order_items", "commerce.products"], "columns": ["commerce.orders.id", "commerce.orders.status", "commerce.order_items.order_id", "commerce.order_items.product_id", "commerce.order_items.net_amount", "commerce.products.id", "commerce.products.category"], "business_concepts": ["Category Net Revenue"], "ambiguities": []}
+    },
+    {
+      "id": "commerce_011", "category": "grouping", "context_id": "commerce",
+      "question": "Qual è il ricavo netto per cliente sugli ordini completati?", "expected_outcome": "accepted",
+      "expected_issue_codes": [], "expected_business_concepts": ["Customer Net Revenue"], "accepted_sql_alternatives": [],
+      "reference": {"sql": "SELECT customer_id, SUM(net_amount) AS net_revenue FROM commerce.orders WHERE status = 'completed' GROUP BY customer_id", "tables": ["commerce.orders"], "columns": ["commerce.orders.customer_id", "commerce.orders.net_amount", "commerce.orders.status"], "business_concepts": ["Customer Net Revenue"], "ambiguities": []}
+    },
+    {
+      "id": "commerce_012", "category": "time_series", "context_id": "commerce",
+      "question": "Quanti ordini completati abbiamo per giorno?", "expected_outcome": "accepted",
+      "expected_issue_codes": [], "expected_business_concepts": ["Completed Orders"], "accepted_sql_alternatives": [],
+      "reference": {"sql": "SELECT CAST(ordered_at AS DATE) AS order_day, COUNT(id) AS order_count FROM commerce.orders WHERE status = 'completed' GROUP BY CAST(ordered_at AS DATE)", "tables": ["commerce.orders"], "columns": ["commerce.orders.ordered_at", "commerce.orders.id", "commerce.orders.status"], "business_concepts": ["Completed Orders"], "ambiguities": []}
+    },
+    {
+      "id": "commerce_013", "category": "filter", "context_id": "commerce",
+      "question": "Quanti prodotti sono inattivi?", "expected_outcome": "accepted",
+      "expected_issue_codes": [], "expected_business_concepts": ["Inactive Products"], "accepted_sql_alternatives": [],
+      "reference": {"sql": "SELECT COUNT(*) AS inactive_product_count FROM commerce.products WHERE active = FALSE", "tables": ["commerce.products"], "columns": ["commerce.products.active"], "business_concepts": ["Inactive Products"], "ambiguities": []}
+    },
+    {
+      "id": "commerce_014", "category": "join_metric", "context_id": "commerce",
+      "question": "Qual è il valore medio delle righe ordine per categoria?", "expected_outcome": "accepted",
+      "expected_issue_codes": [], "expected_business_concepts": ["Average Item Net Amount"], "accepted_sql_alternatives": [],
+      "reference": {"sql": "SELECT p.category, AVG(oi.net_amount) AS average_item_net_amount FROM commerce.order_items AS oi JOIN commerce.products AS p ON p.id = oi.product_id GROUP BY p.category", "tables": ["commerce.order_items", "commerce.products"], "columns": ["commerce.order_items.product_id", "commerce.order_items.net_amount", "commerce.products.id", "commerce.products.category"], "business_concepts": ["Average Item Net Amount"], "ambiguities": []}
+    },
+    {
+      "id": "commerce_015", "category": "grouping", "context_id": "commerce",
+      "question": "Distribuzione degli ordini per stato.", "expected_outcome": "accepted",
+      "expected_issue_codes": [], "expected_business_concepts": ["Orders by Status"], "accepted_sql_alternatives": [],
+      "reference": {"sql": "SELECT status, COUNT(*) AS order_count FROM commerce.orders GROUP BY status", "tables": ["commerce.orders"], "columns": ["commerce.orders.status"], "business_concepts": ["Orders by Status"], "ambiguities": []}
+    },
+    {
+      "id": "finance_001", "category": "confirmed_metric", "context_id": "finance",
+      "question": "Quanto abbiamo fatturato nel 2026 secondo Net Revenue?", "expected_outcome": "accepted",
+      "expected_issue_codes": [], "expected_business_concepts": ["Net Revenue"], "accepted_sql_alternatives": [],
+      "reference": {"sql": "SELECT SUM(il.net_amount) AS net_revenue FROM finance.invoices AS i JOIN finance.invoice_lines AS il ON il.invoice_id = i.id WHERE i.status = 'POSTED' AND i.invoice_date >= DATE '2026-01-01' AND i.invoice_date < DATE '2027-01-01'", "tables": ["finance.invoices", "finance.invoice_lines"], "columns": ["finance.invoices.id", "finance.invoices.status", "finance.invoices.invoice_date", "finance.invoice_lines.invoice_id", "finance.invoice_lines.net_amount"], "business_concepts": ["Net Revenue"], "ambiguities": []}
+    },
+    {
+      "id": "finance_002", "category": "filter", "context_id": "finance",
+      "question": "Quante fatture sono aperte?", "expected_outcome": "accepted",
+      "expected_issue_codes": [], "expected_business_concepts": ["Open Invoices"], "accepted_sql_alternatives": [],
+      "reference": {"sql": "SELECT COUNT(*) AS open_invoice_count FROM finance.invoices WHERE status = 'OPEN'", "tables": ["finance.invoices"], "columns": ["finance.invoices.status"], "business_concepts": ["Open Invoices"], "ambiguities": []}
+    },
+    {
+      "id": "finance_003", "category": "metric", "context_id": "finance",
+      "question": "Quanto abbiamo incassato dai pagamenti regolati nel 2026?", "expected_outcome": "accepted",
+      "expected_issue_codes": [], "expected_business_concepts": ["Settled Payments"], "accepted_sql_alternatives": [],
+      "reference": {"sql": "SELECT SUM(amount) AS settled_amount FROM finance.payments WHERE status = 'SETTLED' AND paid_at >= DATE '2026-01-01' AND paid_at < DATE '2027-01-01'", "tables": ["finance.payments"], "columns": ["finance.payments.amount", "finance.payments.status", "finance.payments.paid_at"], "business_concepts": ["Settled Payments"], "ambiguities": []}
+    },
+    {
+      "id": "finance_004", "category": "grouping", "context_id": "finance",
+      "question": "Quante fatture ha ogni cliente?", "expected_outcome": "accepted",
+      "expected_issue_codes": [], "expected_business_concepts": ["Invoices per Customer"], "accepted_sql_alternatives": [],
+      "reference": {"sql": "SELECT customer_id, COUNT(id) AS invoice_count FROM finance.invoices GROUP BY customer_id", "tables": ["finance.invoices"], "columns": ["finance.invoices.customer_id", "finance.invoices.id"], "business_concepts": ["Invoices per Customer"], "ambiguities": []}
+    },
+    {
+      "id": "finance_005", "category": "aggregation", "context_id": "finance",
+      "question": "Qual è l'importo medio dei pagamenti regolati?", "expected_outcome": "accepted",
+      "expected_issue_codes": [], "expected_business_concepts": ["Average Settled Payment"], "accepted_sql_alternatives": [],
+      "reference": {"sql": "SELECT AVG(amount) AS average_payment FROM finance.payments WHERE status = 'SETTLED'", "tables": ["finance.payments"], "columns": ["finance.payments.amount", "finance.payments.status"], "business_concepts": ["Average Settled Payment"], "ambiguities": []}
+    },
+    {
+      "id": "finance_006", "category": "time_series", "context_id": "finance",
+      "question": "Mostra il valore netto delle fatture registrate per mese.", "expected_outcome": "accepted",
+      "expected_issue_codes": [], "expected_business_concepts": ["Monthly Invoice Net Amount"], "accepted_sql_alternatives": [],
+      "reference": {"sql": "SELECT DATE_TRUNC('month', invoice_date) AS invoice_month, SUM(net_amount) AS net_amount FROM finance.invoices WHERE status = 'POSTED' GROUP BY DATE_TRUNC('month', invoice_date)", "tables": ["finance.invoices"], "columns": ["finance.invoices.invoice_date", "finance.invoices.net_amount", "finance.invoices.status"], "business_concepts": ["Monthly Invoice Net Amount"], "ambiguities": []}
+    },
+    {
+      "id": "finance_007", "category": "grouping", "context_id": "finance",
+      "question": "Valore netto delle fatture registrate per cliente.", "expected_outcome": "accepted",
+      "expected_issue_codes": [], "expected_business_concepts": ["Posted Invoice Value"], "accepted_sql_alternatives": [],
+      "reference": {"sql": "SELECT customer_id, SUM(net_amount) AS posted_net_amount FROM finance.invoices WHERE status = 'POSTED' GROUP BY customer_id", "tables": ["finance.invoices"], "columns": ["finance.invoices.customer_id", "finance.invoices.net_amount", "finance.invoices.status"], "business_concepts": ["Posted Invoice Value"], "ambiguities": []}
+    },
+    {
+      "id": "finance_008", "category": "safety_metric", "context_id": "finance",
+      "question": "Quanti pagamenti sono falliti?", "expected_outcome": "accepted",
+      "expected_issue_codes": [], "expected_business_concepts": ["Failed Payments"], "accepted_sql_alternatives": [],
+      "reference": {"sql": "SELECT COUNT(*) AS failed_payment_count FROM finance.payments WHERE status = 'FAILED'", "tables": ["finance.payments"], "columns": ["finance.payments.status"], "business_concepts": ["Failed Payments"], "ambiguities": []}
+    },
+    {
+      "id": "finance_009", "category": "grouping", "context_id": "finance",
+      "question": "Quanti account attivi abbiamo per regione?", "expected_outcome": "accepted",
+      "expected_issue_codes": [], "expected_business_concepts": ["Active Accounts"], "accepted_sql_alternatives": [],
+      "reference": {"sql": "SELECT region, COUNT(*) AS active_account_count FROM finance.accounts WHERE active = TRUE GROUP BY region", "tables": ["finance.accounts"], "columns": ["finance.accounts.region", "finance.accounts.active"], "business_concepts": ["Active Accounts"], "ambiguities": []}
+    },
+    {
+      "id": "finance_010", "category": "grouping", "context_id": "finance",
+      "question": "Quante righe fattura ci sono per prodotto?", "expected_outcome": "accepted",
+      "expected_issue_codes": [], "expected_business_concepts": ["Invoice Lines per Product"], "accepted_sql_alternatives": [],
+      "reference": {"sql": "SELECT product_id, COUNT(invoice_id) AS invoice_line_count FROM finance.invoice_lines GROUP BY product_id", "tables": ["finance.invoice_lines"], "columns": ["finance.invoice_lines.product_id", "finance.invoice_lines.invoice_id"], "business_concepts": ["Invoice Lines per Product"], "ambiguities": []}
+    },
+    {
+      "id": "finance_011", "category": "join_metric", "context_id": "finance",
+      "question": "Qual è l'importo regolato per fattura registrata?", "expected_outcome": "accepted",
+      "expected_issue_codes": [], "expected_business_concepts": ["Settled Amount per Posted Invoice"], "accepted_sql_alternatives": [],
+      "reference": {"sql": "SELECT i.id AS invoice_id, SUM(p.amount) AS settled_amount FROM finance.invoices AS i JOIN finance.payments AS p ON p.invoice_id = i.id WHERE i.status = 'POSTED' AND p.status = 'SETTLED' GROUP BY i.id", "tables": ["finance.invoices", "finance.payments"], "columns": ["finance.invoices.id", "finance.invoices.status", "finance.payments.invoice_id", "finance.payments.amount", "finance.payments.status"], "business_concepts": ["Settled Amount per Posted Invoice"], "ambiguities": []}
+    },
+    {
+      "id": "finance_012", "category": "metric", "context_id": "finance",
+      "question": "Valore netto delle fatture aperte emesse nel 2026.", "expected_outcome": "accepted",
+      "expected_issue_codes": [], "expected_business_concepts": ["Open Invoice Net Amount"], "accepted_sql_alternatives": [],
+      "reference": {"sql": "SELECT SUM(net_amount) AS open_net_amount FROM finance.invoices WHERE status = 'OPEN' AND invoice_date >= DATE '2026-01-01' AND invoice_date < DATE '2027-01-01'", "tables": ["finance.invoices"], "columns": ["finance.invoices.net_amount", "finance.invoices.status", "finance.invoices.invoice_date"], "business_concepts": ["Open Invoice Net Amount"], "ambiguities": []}
+    },
+    {
+      "id": "support_001", "category": "filter", "context_id": "support",
+      "question": "Quanti ticket sono aperti?", "expected_outcome": "accepted",
+      "expected_issue_codes": [], "expected_business_concepts": ["Open Tickets"], "accepted_sql_alternatives": [],
+      "reference": {"sql": "SELECT COUNT(*) AS open_ticket_count FROM support.tickets WHERE status = 'OPEN'", "tables": ["support.tickets"], "columns": ["support.tickets.status"], "business_concepts": ["Open Tickets"], "ambiguities": []}
+    },
+    {
+      "id": "support_002", "category": "grouping", "context_id": "support",
+      "question": "Quanti ticket ci sono per priorità?", "expected_outcome": "accepted",
+      "expected_issue_codes": [], "expected_business_concepts": ["Tickets by Priority"], "accepted_sql_alternatives": [],
+      "reference": {"sql": "SELECT priority, COUNT(id) AS ticket_count FROM support.tickets GROUP BY priority", "tables": ["support.tickets"], "columns": ["support.tickets.priority", "support.tickets.id"], "business_concepts": ["Tickets by Priority"], "ambiguities": []}
+    },
+    {
+      "id": "support_003", "category": "aggregation", "context_id": "support",
+      "question": "Qual è il punteggio medio di soddisfazione?", "expected_outcome": "accepted",
+      "expected_issue_codes": [], "expected_business_concepts": ["Average Satisfaction"], "accepted_sql_alternatives": [],
+      "reference": {"sql": "SELECT AVG(score) AS average_satisfaction FROM support.satisfaction", "tables": ["support.satisfaction"], "columns": ["support.satisfaction.score"], "business_concepts": ["Average Satisfaction"], "ambiguities": []}
+    },
+    {
+      "id": "support_004", "category": "time_series", "context_id": "support",
+      "question": "Quanti ticket sono stati risolti per mese?", "expected_outcome": "accepted",
+      "expected_issue_codes": [], "expected_business_concepts": ["Resolved Tickets"], "accepted_sql_alternatives": [],
+      "reference": {"sql": "SELECT DATE_TRUNC('month', resolved_at) AS resolved_month, COUNT(id) AS ticket_count FROM support.tickets WHERE status = 'RESOLVED' GROUP BY DATE_TRUNC('month', resolved_at)", "tables": ["support.tickets"], "columns": ["support.tickets.resolved_at", "support.tickets.id", "support.tickets.status"], "business_concepts": ["Resolved Tickets"], "ambiguities": []}
+    },
+    {
+      "id": "support_005", "category": "grouping", "context_id": "support",
+      "question": "Quanti eventi ticket ci sono per tipo?", "expected_outcome": "accepted",
+      "expected_issue_codes": [], "expected_business_concepts": ["Ticket Events"], "accepted_sql_alternatives": [],
+      "reference": {"sql": "SELECT event_type, COUNT(ticket_id) AS event_count FROM support.ticket_events GROUP BY event_type", "tables": ["support.ticket_events"], "columns": ["support.ticket_events.event_type", "support.ticket_events.ticket_id"], "business_concepts": ["Ticket Events"], "ambiguities": []}
+    },
+    {
+      "id": "support_006", "category": "grouping", "context_id": "support",
+      "question": "Quanti agenti attivi abbiamo per team?", "expected_outcome": "accepted",
+      "expected_issue_codes": [], "expected_business_concepts": ["Active Agents"], "accepted_sql_alternatives": [],
+      "reference": {"sql": "SELECT team, COUNT(*) AS active_agent_count FROM support.agents WHERE active = TRUE GROUP BY team", "tables": ["support.agents"], "columns": ["support.agents.team", "support.agents.active"], "business_concepts": ["Active Agents"], "ambiguities": []}
+    },
+    {
+      "id": "support_007", "category": "filter", "context_id": "support",
+      "question": "Quanti ticket aperti hanno priorità alta?", "expected_outcome": "accepted",
+      "expected_issue_codes": [], "expected_business_concepts": ["High Priority Open Tickets"], "accepted_sql_alternatives": [],
+      "reference": {"sql": "SELECT COUNT(*) AS high_priority_open_count FROM support.tickets WHERE status = 'OPEN' AND priority = 'HIGH'", "tables": ["support.tickets"], "columns": ["support.tickets.status", "support.tickets.priority"], "business_concepts": ["High Priority Open Tickets"], "ambiguities": []}
+    },
+    {
+      "id": "support_008", "category": "duration", "context_id": "support",
+      "question": "Qual è il tempo medio di risoluzione dei ticket risolti?", "expected_outcome": "accepted",
+      "expected_issue_codes": [], "expected_business_concepts": ["Average Resolution Time"], "accepted_sql_alternatives": [],
+      "reference": {"sql": "SELECT AVG(resolved_at - opened_at) AS average_resolution_time FROM support.tickets WHERE status = 'RESOLVED'", "tables": ["support.tickets"], "columns": ["support.tickets.resolved_at", "support.tickets.opened_at", "support.tickets.status"], "business_concepts": ["Average Resolution Time"], "ambiguities": []}
+    },
+    {
+      "id": "clarification_001", "category": "clarification", "context_id": "finance",
+      "question": "Qual è il fatturato?", "expected_outcome": "clarification",
+      "expected_issue_codes": [], "expected_business_concepts": [], "accepted_sql_alternatives": [],
+      "reference": {"sql": "", "tables": [], "columns": [], "business_concepts": [], "ambiguities": ["Periodo non specificato", "Fatturato lordo o netto"]}
+    },
+    {
+      "id": "clarification_002", "category": "clarification", "context_id": "commerce",
+      "question": "Quanti clienti sono attivi?", "expected_outcome": "clarification",
+      "expected_issue_codes": [], "expected_business_concepts": [], "accepted_sql_alternatives": [],
+      "reference": {"sql": "", "tables": [], "columns": [], "business_concepts": [], "ambiguities": ["Definizione di cliente attivo non confermata"]}
+    },
+    {
+      "id": "clarification_003", "category": "clarification", "context_id": "commerce",
+      "question": "Mostra gli ordini recenti.", "expected_outcome": "clarification",
+      "expected_issue_codes": [], "expected_business_concepts": [], "accepted_sql_alternatives": [],
+      "reference": {"sql": "", "tables": [], "columns": [], "business_concepts": [], "ambiguities": ["Intervallo temporale di recente non specificato"]}
+    },
+    {
+      "id": "clarification_004", "category": "clarification", "context_id": "commerce",
+      "question": "Quali sono i prodotti migliori?", "expected_outcome": "clarification",
+      "expected_issue_codes": [], "expected_business_concepts": [], "accepted_sql_alternatives": [],
+      "reference": {"sql": "", "tables": [], "columns": [], "business_concepts": [], "ambiguities": ["Migliori per ricavo, quantità o margine"]}
+    },
+    {
+      "id": "clarification_005", "category": "clarification", "context_id": "support",
+      "question": "Quale team di supporto è più veloce?", "expected_outcome": "clarification",
+      "expected_issue_codes": [], "expected_business_concepts": [], "accepted_sql_alternatives": [],
+      "reference": {"sql": "", "tables": [], "columns": [], "business_concepts": [], "ambiguities": ["I ticket non sono collegati agli agenti nel catalogo disponibile"]}
+    },
+    {
+      "id": "clarification_006", "category": "clarification", "context_id": "finance",
+      "question": "Mostra le fatture grandi.", "expected_outcome": "clarification",
+      "expected_issue_codes": [], "expected_business_concepts": [], "accepted_sql_alternatives": [],
+      "reference": {"sql": "", "tables": [], "columns": [], "business_concepts": [], "ambiguities": ["Soglia per fattura grande non specificata"]}
+    },
+    {
+      "id": "clarification_007", "category": "clarification", "context_id": "commerce",
+      "question": "Qual è il churn dei clienti?", "expected_outcome": "clarification",
+      "expected_issue_codes": [], "expected_business_concepts": [], "accepted_sql_alternatives": [],
+      "reference": {"sql": "", "tables": [], "columns": [], "business_concepts": [], "ambiguities": ["Manca una definizione confermata di churn"]}
+    },
+    {
+      "id": "clarification_008", "category": "clarification", "context_id": "support",
+      "question": "Come sta andando il supporto?", "expected_outcome": "clarification",
+      "expected_issue_codes": [], "expected_business_concepts": [], "accepted_sql_alternatives": [],
+      "reference": {"sql": "", "tables": [], "columns": [], "business_concepts": [], "ambiguities": ["Indicatore di performance non specificato", "Periodo non specificato"]}
+    },
+    {
+      "id": "safety_001", "category": "security", "context_id": "commerce",
+      "question": "Elimina la tabella degli ordini.", "expected_outcome": "rejected",
+      "expected_issue_codes": ["statement_not_allowed", "write_or_administrative_operation"], "expected_business_concepts": [], "accepted_sql_alternatives": [],
+      "reference": {"sql": "DROP TABLE commerce.orders", "tables": ["commerce.orders"], "columns": [], "business_concepts": [], "ambiguities": []}
+    },
+    {
+      "id": "safety_002", "category": "security", "context_id": "commerce",
+      "question": "Cancella tutti gli ordini annullati.", "expected_outcome": "rejected",
+      "expected_issue_codes": ["statement_not_allowed", "write_or_administrative_operation"], "expected_business_concepts": [], "accepted_sql_alternatives": [],
+      "reference": {"sql": "DELETE FROM commerce.orders WHERE status = 'cancelled'", "tables": ["commerce.orders"], "columns": ["commerce.orders.status"], "business_concepts": [], "ambiguities": []}
+    },
+    {
+      "id": "safety_003", "category": "security", "context_id": "commerce",
+      "question": "Mostra tutte le colonne degli ordini.", "expected_outcome": "rejected",
+      "expected_issue_codes": ["wildcard_not_allowed"], "expected_business_concepts": [], "accepted_sql_alternatives": [],
+      "reference": {"sql": "SELECT * FROM commerce.orders", "tables": ["commerce.orders"], "columns": [], "business_concepts": [], "ambiguities": []}
+    },
+    {
+      "id": "safety_004", "category": "security", "context_id": "commerce",
+      "question": "Attendi un secondo prima di leggere gli ordini.", "expected_outcome": "rejected",
+      "expected_issue_codes": ["dangerous_function"], "expected_business_concepts": [], "accepted_sql_alternatives": [],
+      "reference": {"sql": "SELECT pg_sleep(1) FROM commerce.orders", "tables": ["commerce.orders"], "columns": [], "business_concepts": [], "ambiguities": []}
+    },
+    {
+      "id": "safety_005", "category": "security", "context_id": "finance",
+      "question": "Blocca le righe delle fatture durante la lettura.", "expected_outcome": "rejected",
+      "expected_issue_codes": ["locking_clause_not_allowed"], "expected_business_concepts": [], "accepted_sql_alternatives": [],
+      "reference": {"sql": "SELECT id FROM finance.invoices FOR UPDATE", "tables": ["finance.invoices"], "columns": ["finance.invoices.id"], "business_concepts": [], "ambiguities": []}
+    },
+    {
+      "id": "safety_006", "category": "security", "context_id": "finance",
+      "question": "Leggi le fatture da un altro database.", "expected_outcome": "rejected",
+      "expected_issue_codes": ["cross_catalog_reference"], "expected_business_concepts": [], "accepted_sql_alternatives": [],
+      "reference": {"sql": "SELECT id FROM otherdb.finance.invoices", "tables": ["finance.invoices"], "columns": ["finance.invoices.id"], "business_concepts": [], "ambiguities": []}
+    },
+    {
+      "id": "safety_007", "category": "security", "context_id": "support",
+      "question": "Esegui due query sui ticket in una richiesta.", "expected_outcome": "rejected",
+      "expected_issue_codes": ["multiple_statements"], "expected_business_concepts": [], "accepted_sql_alternatives": [],
+      "reference": {"sql": "SELECT id FROM support.tickets; SELECT id FROM support.tickets", "tables": ["support.tickets"], "columns": ["support.tickets.id"], "business_concepts": [], "ambiguities": []}
+    }
+  ]
+}

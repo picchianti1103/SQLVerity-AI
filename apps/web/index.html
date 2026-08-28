@@ -1,0 +1,627 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <meta name="description" content="Governed console for configuring SQLVerity AI and querying approved data sources.">
+    <title>SQLVerity AI · Governed DB Studio</title>
+    <link rel="stylesheet" href="/ui/assets/styles.css?v=26">
+    <script src="/ui/assets/i18n.js?v=26" defer></script>
+    <script src="/ui/assets/guidance.js?v=26" defer></script>
+    <script src="/ui/assets/app.js?v=26" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#workspace" data-i18n="app.skip">Skip to content</a>
+
+    <header class="topbar">
+      <a class="brand" href="/ui" aria-label="SQLVerity AI home">
+        <span class="brand-mark" aria-hidden="true">S</span>
+        <span><strong>SQLVerity AI</strong><small>Governed DB Studio</small></span>
+      </a>
+      <div class="context-strip">
+        <span class="context-label">Tenant</span>
+        <strong id="header-tenant">not selected</strong>
+        <span class="divider" aria-hidden="true"></span>
+        <span class="context-label">Data source</span>
+        <strong id="header-source">not selected</strong>
+      </div>
+      <button id="help-button" class="button button-help" type="button" aria-controls="help-drawer" aria-expanded="false">
+        <span aria-hidden="true">?</span> Help
+      </button>
+      <div id="connection-state" class="connection-state" data-state="offline">
+        <span class="status-dot" aria-hidden="true"></span>
+        <span>Not connected</span>
+      </div>
+    </header>
+
+    <div class="app-shell">
+      <aside class="sidebar" aria-label="Primary navigation">
+        <nav class="nav-list">
+          <button class="nav-item is-active" type="button" data-panel="system">
+            <span class="nav-index">01</span><span class="nav-copy"><strong>System</strong><small>Access &amp; workspace</small></span>
+          </button>
+          <button class="nav-item" type="button" data-panel="sources">
+            <span class="nav-index">02</span><span class="nav-copy"><strong>Sources</strong><small>Data connection &amp; catalog</small></span>
+          </button>
+          <button class="nav-item" type="button" data-panel="schema">
+            <span class="nav-index">03</span><span class="nav-copy"><strong>Schema</strong><small>Review governed metadata</small></span>
+          </button>
+          <button class="nav-item" type="button" data-panel="privacy">
+            <span class="nav-index">04</span><span class="nav-copy"><strong>Privacy &amp; AI</strong><small>Authorize AI sharing</small></span>
+          </button>
+          <button class="nav-item" type="button" data-panel="query">
+            <span class="nav-index">05</span><span class="nav-copy"><strong>Query Studio</strong><small>Generate, review &amp; run</small></span>
+          </button>
+          <button class="nav-item" type="button" data-panel="admin">
+            <span class="nav-index">06</span><span class="nav-copy"><strong>Administration</strong><small>Identities &amp; operations</small></span>
+          </button>
+        </nav>
+        <div class="sidebar-note">
+          <span class="eyebrow">Safety boundary</span>
+          <p>Only validated read-only queries. Execution always requires explicit approval.</p>
+        </div>
+      </aside>
+
+      <main id="workspace" class="workspace" tabindex="-1">
+        <div id="flash" class="flash" role="status" aria-live="polite" hidden></div>
+
+        <section id="panel-system" class="panel is-active" data-panel-view="system">
+          <div class="page-heading">
+            <div>
+              <span class="eyebrow">Control plane</span>
+              <h1>Configure your environment</h1>
+              <p>Connect the console, select the operating boundary, and review active capabilities.</p>
+            </div>
+            <div class="page-actions"><button class="button button-quiet help-trigger" type="button" data-help="system">Explain this page</button><span class="step-badge">Step 1 of 6</span></div>
+          </div>
+
+          <div class="page-summary" role="note" aria-label="Purpose and outcome">
+            <div><span>Purpose</span><strong>Establish your identity and workspace boundary.</strong></div>
+            <div><span>You need</span><strong>An API key or a configured SSO session.</strong></div>
+            <div><span>Outcome</span><strong>A selected tenant for every later action.</strong></div>
+          </div>
+
+          <div class="grid grid-two">
+            <article class="card card-accent">
+              <div class="card-heading">
+                <div><span class="card-kicker">Access</span><h2>API session</h2></div>
+                <span class="privacy-pill">memory only</span>
+              </div>
+              <form id="connection-form" class="form-stack">
+                <label for="api-token">Bearer API key</label>
+                <div class="input-action">
+                  <input id="api-token" type="password" autocomplete="off" spellcheck="false"
+                    placeholder="Paste a bootstrap or personal API key" required>
+                  <button id="toggle-token" class="button button-quiet" type="button">Show</button>
+                </div>
+                <p class="field-help">The key is never saved in browser storage and disappears when the page is reloaded.</p>
+                <div class="button-row">
+                  <button class="button button-primary" type="submit">Connect</button>
+                  <a id="oidc-login" class="button button-secondary" href="/auth/oidc/login" hidden>Sign in with SSO</a>
+                  <button id="disconnect-button" class="button button-secondary" type="button" disabled>Disconnect</button>
+                </div>
+                <p id="browser-session" class="field-help" hidden></p>
+              </form>
+            </article>
+
+            <article class="card">
+              <div class="card-heading">
+                <div><span class="card-kicker">Boundary</span><h2>Workspace context</h2></div>
+              </div>
+              <div class="form-stack">
+                <label for="tenant-select">Available tenant</label>
+                <select id="tenant-select" disabled><option value="">Connect the console first</option></select>
+                <details class="disclosure">
+                  <summary>Or enter a tenant ID</summary>
+                  <div class="inline-form">
+                    <input id="tenant-id-manual" type="text" autocomplete="off" placeholder="tenant-id">
+                    <button id="use-tenant-id" class="button button-secondary" type="button">Use ID</button>
+                  </div>
+                  <p class="field-help">Useful for restricted roles that cannot list every tenant.</p>
+                </details>
+                <details id="create-tenant-disclosure" class="disclosure">
+                  <summary>Create a new tenant</summary>
+                  <form id="tenant-form" class="inline-form">
+                    <input id="tenant-name" type="text" maxlength="200" placeholder="Organization name" required>
+                    <button class="button button-primary" type="submit">Create</button>
+                  </form>
+                </details>
+              </div>
+            </article>
+          </div>
+
+          <article class="card capability-card">
+            <div class="card-heading">
+              <div><span class="card-kicker">Runtime</span><h2>Detected capabilities</h2></div>
+              <span id="service-version" class="mono-tag">version —</span>
+            </div>
+            <div class="capability-grid">
+              <div><span class="metric-label">Catalog backend</span><strong id="catalog-backend">—</strong></div>
+              <div><span class="metric-label">SQL dialects</span><div id="dialect-list" class="tag-list"><span class="tag muted">—</span></div></div>
+              <div><span class="metric-label">Active LLM providers</span><div id="provider-list" class="tag-list"><span class="tag muted">—</span></div></div>
+            </div>
+          </article>
+
+          <article id="onboarding-card" class="card onboarding-card" aria-labelledby="onboarding-title">
+            <div class="card-heading">
+              <div><span class="card-kicker">Guided setup</span><h2 id="onboarding-title">Getting started</h2><p>Follow the governed path to your first result.</p></div>
+              <strong id="onboarding-progress-label" class="mono-tag">0 of 7 steps complete</strong>
+            </div>
+            <div class="progress-track" role="progressbar" aria-label="Onboarding progress" aria-valuemin="0" aria-valuemax="7" aria-valuenow="0"><span id="onboarding-progress"></span></div>
+            <div id="onboarding-list" class="onboarding-list"></div>
+          </article>
+        </section>
+
+        <section id="panel-sources" class="panel" data-panel-view="sources" hidden>
+          <div class="page-heading">
+            <div>
+              <span class="eyebrow">Data plane</span>
+              <h1>Register a data source</h1>
+              <p>Connect a database or import metadata without executing DDL.</p>
+            </div>
+            <div class="page-actions"><button class="button button-quiet help-trigger" type="button" data-help="sources">Explain this page</button><span class="step-badge">Step 2 of 6</span></div>
+          </div>
+
+          <div class="page-summary" role="note" aria-label="Purpose and outcome">
+            <div><span>Purpose</span><strong>Define a governed data boundary.</strong></div>
+            <div><span>You need</span><strong>A connected session and selected tenant.</strong></div>
+            <div><span>Outcome</span><strong>A selected source with a versioned catalog.</strong></div>
+          </div>
+
+          <div class="source-layout">
+            <article class="card source-list-card">
+              <div class="card-heading">
+                <div><span class="card-kicker">Catalog</span><h2>Data sources</h2></div>
+                <button id="refresh-sources" class="button button-quiet" type="button">Refresh</button>
+              </div>
+              <div id="source-list" class="source-list empty-state">
+                <p>Select a tenant to view its data sources.</p>
+              </div>
+            </article>
+
+            <article class="card">
+              <div class="card-heading">
+                <div><span class="card-kicker">New source</span><h2>Connection and mode</h2></div>
+              </div>
+              <form id="source-form" class="form-grid">
+                <label class="field-wide" for="source-name">Name</label>
+                <input class="field-wide" id="source-name" type="text" maxlength="200" placeholder="Sales warehouse" required>
+
+                <label for="source-type">Source setup mode</label>
+                <label for="source-dialect">Dialect</label>
+                <select id="source-type" required>
+                  <option value="direct_db">Direct database</option>
+                  <option value="hybrid">Hybrid · database plus imported metadata</option>
+                  <option value="ddl_import">DDL import · no database connection</option>
+                  <option value="manual_schema">Manual JSON schema · no database connection</option>
+                  <option value="limited_schema">Limited schema · advanced setup</option>
+                  <option value="view_source">Governed views · advanced setup</option>
+                  <option value="metadata_file">Metadata file · advanced setup</option>
+                  <option value="authorized_query">Authorized query · PostgreSQL/API setup</option>
+                </select>
+                <select id="source-dialect" required>
+                  <option value="postgresql">PostgreSQL</option>
+                  <option value="mysql">MySQL</option>
+                  <option value="mariadb">MariaDB</option>
+                  <option value="oracle">Oracle</option>
+                  <option value="sqlserver">SQL Server</option>
+                </select>
+                <div id="source-mode-help" class="choice-explanation field-wide" role="status"></div>
+
+                <label class="field-wide" for="secret-ref">Secret reference</label>
+                <input class="field-wide" id="secret-ref" type="text" maxlength="500" autocomplete="off"
+                  placeholder="e.g. env://SQLVERITY_SALES_DB (never enter the password)">
+                <p class="field-help field-wide">Opaque name resolved by the server from its environment. Credentials never enter the catalog.</p>
+
+                <fieldset class="field-wide check-grid capability-picker">
+                  <legend>Database permissions requested</legend>
+                  <label><input type="checkbox" name="capability" value="introspect"><span><strong>Read schema metadata</strong><small>Discover tables, columns, comments, and relationships.</small></span></label>
+                  <label><input type="checkbox" name="capability" value="explain"><span><strong>Inspect query plans</strong><small>Run non-executing EXPLAIN before approval.</small></span></label>
+                  <label><input type="checkbox" name="capability" value="execute_read_only"><span><strong>Execute read-only</strong><small>Run only validated and explicitly approved queries.</small></span></label>
+                  <label><input type="checkbox" name="capability" value="cancel"><span><strong>Cancel active queries</strong><small>Allow the backend to interrupt an active execution.</small></span></label>
+                  <label><input type="checkbox" name="capability" value="preview"><span><strong>Preview capability</strong><small>Reserved capability; no dedicated console action yet.</small></span></label>
+                  <div class="capability-actions">
+                    <button id="apply-source-defaults" class="button button-quiet" type="button">Use recommended permissions</button>
+                    <span id="capability-guidance" class="field-help">Permissions are never exercised automatically.</span>
+                  </div>
+                </fieldset>
+                <div class="field-wide button-row">
+                  <button class="button button-primary" type="submit">Register source</button>
+                </div>
+              </form>
+            </article>
+          </div>
+
+          <article class="card import-card">
+            <div class="card-heading">
+              <div><span class="card-kicker">Acquisition</span><h2>Populate the catalog</h2></div>
+              <span id="import-target" class="mono-tag">no data source</span>
+            </div>
+            <div class="tabs" role="tablist" aria-label="Acquisition method">
+              <button class="tab is-active" type="button" role="tab" aria-selected="true" data-import-tab="introspect">Introspection</button>
+              <button class="tab" type="button" role="tab" aria-selected="false" data-import-tab="ddl">DDL</button>
+              <button class="tab" type="button" role="tab" aria-selected="false" data-import-tab="manual">Manual JSON</button>
+            </div>
+            <div id="acquisition-guidance" class="choice-explanation" role="status">Select a data source to see its compatible catalog methods.</div>
+            <div class="tab-panel is-active" data-import-view="introspect">
+              <p>Reads only source metadata using the secret reference configured on the server.</p>
+              <button id="run-introspection" class="button button-primary" type="button">Start introspection</button>
+            </div>
+            <form id="ddl-form" class="tab-panel form-stack" data-import-view="ddl" hidden>
+              <label for="default-schema">Default schema</label>
+              <input id="default-schema" type="text" maxlength="200" placeholder="public">
+              <label for="ddl-input">SQL definitions</label>
+              <textarea id="ddl-input" class="code-input" rows="10" spellcheck="false" required
+                placeholder="CREATE TABLE public.orders (...);"></textarea>
+              <button class="button button-primary align-start" type="submit">Import DDL without executing it</button>
+            </form>
+            <form id="manual-form" class="tab-panel form-stack" data-import-view="manual" hidden>
+              <label for="manual-input">JSON schema snapshot</label>
+              <textarea id="manual-input" class="code-input" rows="12" spellcheck="false" required></textarea>
+              <button class="button button-primary align-start" type="submit">Import snapshot</button>
+            </form>
+            <div id="import-result" class="result-callout" hidden></div>
+          </article>
+        </section>
+
+        <section id="panel-schema" class="panel" data-panel-view="schema" hidden>
+          <div class="page-heading">
+            <div>
+              <span class="eyebrow">Catalog intelligence</span>
+              <h1>Explore the schema</h1>
+              <p>Review objects, classifications, semantics, and relationships in the current catalog version.</p>
+            </div>
+            <div class="page-actions"><button class="button button-quiet help-trigger" type="button" data-help="schema">Explain this page</button><button id="refresh-schema" class="button button-primary" type="button">Load schema</button><span class="step-badge">Step 3 of 6</span></div>
+          </div>
+          <div class="page-summary" role="note" aria-label="Purpose and outcome">
+            <div><span>Purpose</span><strong>Verify the metadata SQLVerity AI will govern.</strong></div>
+            <div><span>You need</span><strong>A selected source with a catalog version.</strong></div>
+            <div><span>Outcome</span><strong>Reviewed objects, classifications, and relationships.</strong></div>
+          </div>
+          <div class="schema-toolbar">
+            <input id="schema-search" type="search" placeholder="Filter tables, views, or columns" aria-label="Filter schema">
+            <span id="schema-version" class="mono-tag">catalog —</span>
+          </div>
+          <div class="schema-layout">
+            <aside id="object-list" class="object-list card empty-state">
+              <p>No schema loaded.</p>
+            </aside>
+            <article id="object-detail" class="card object-detail empty-state">
+              <p>Select an object to inspect its details.</p>
+            </article>
+          </div>
+          <article class="card relationship-card">
+            <div class="card-heading"><div><span class="card-kicker">Graph</span><h2>Relationships</h2></div></div>
+            <div id="relationship-list" class="relationship-list empty-state"><p>No relationships loaded.</p></div>
+          </article>
+        </section>
+
+        <section id="panel-privacy" class="panel" data-panel-view="privacy" hidden>
+          <div class="page-heading">
+            <div>
+              <span class="eyebrow">Transfer boundary</span>
+              <h1>Privacy and AI Sharing</h1>
+              <p>Make an informed decision about which metadata may reach each provider before using Query Studio.</p>
+            </div>
+            <div class="page-actions"><button class="button button-quiet help-trigger" type="button" data-help="privacy">Explain this page</button><button id="refresh-privacy" class="button button-primary" type="button">Refresh</button><span class="step-badge">Step 4 of 6</span></div>
+          </div>
+
+          <div class="page-summary" role="note" aria-label="Purpose and outcome">
+            <div><span>Purpose</span><strong>Authorize specific AI transfers before use.</strong></div>
+            <div><span>You need</span><strong>A source and a server-configured provider.</strong></div>
+            <div><span>Outcome</span><strong>An acknowledged tenant or source policy.</strong></div>
+          </div>
+
+          <div class="privacy-boundary" role="note">
+            <strong>The AI provider does not receive database rows, credentials, raw parameters, EXPLAIN plans, or results.</strong>
+            <span>It receives the full question and only the schema and semantic context allowed by policy. A value typed directly into the question is part of the prompt.</span>
+          </div>
+
+          <div class="grid grid-two privacy-grid">
+            <article class="card">
+              <div class="card-heading"><div><span class="card-kicker">Deployment</span><h2>Configured providers</h2></div></div>
+              <p class="field-help">Select a provider card to review or edit its effective authorization.</p>
+              <div id="privacy-provider-list" class="admin-list empty-state"><p>Select a tenant and data source.</p></div>
+            </article>
+
+            <article class="card">
+              <div class="card-heading"><div><span class="card-kicker">Informed authorization</span><h2>Sharing policy</h2></div></div>
+              <form id="provider-policy-form" class="form-stack">
+                <label for="policy-provider">Provider ID</label>
+                <input id="policy-provider" list="provider-options" maxlength="100" required placeholder="openai">
+                <p id="policy-deployment-summary" class="field-help">Select a provider to verify its declared model, residency, and retention.</p>
+                <label for="policy-classification">Maximum allowed classification</label>
+                <select id="policy-classification">
+                  <option value="internal">Internal</option>
+                  <option value="confidential">Confidential</option>
+                  <option value="pii">PII</option>
+                  <option value="highly_sensitive">Highly sensitive</option>
+                </select>
+                <p class="field-help">This is the highest metadata sensitivity that may leave SQLVerity AI. Database rows are never included.</p>
+                <fieldset class="purpose-fieldset">
+                  <legend>Purposes authorized separately</legend>
+                  <label><input name="policy-purpose" type="checkbox" value="sql_proposal_generation" checked> SQL proposal generation</label>
+                  <label><input name="policy-purpose" type="checkbox" value="semantic_description_inference"> Schema description inference</label>
+                  <label><input name="policy-purpose" type="checkbox" value="intent_correction_interpretation"> Correction interpretation</label>
+                </fieldset>
+                <label for="policy-residency">Declared residency</label>
+                <input id="policy-residency" required value="unspecified" pattern="[a-z0-9][a-z0-9_-]*" aria-describedby="policy-residency-help">
+                <p id="policy-residency-help" class="field-help"><code>unspecified</code>: SQLVerity AI has no recorded residency guarantee.</p>
+                <label for="policy-retention">Declared retention</label>
+                <select id="policy-retention">
+                  <option value="provider_default">Provider/account default · not equivalent to zero retention</option>
+                  <option value="zero">Declared zero retention</option>
+                  <option value="temporary">Temporary</option>
+                  <option value="local_runtime">Local runtime</option>
+                </select>
+                <label class="checkbox-label"><input id="policy-source-scope" type="checkbox"> Override for the selected source; takes precedence over the tenant baseline</label>
+                <p id="policy-scope-summary" class="choice-explanation">Tenant baseline: applies to this provider across the current tenant unless a source override exists.</p>
+                <label class="checkbox-label"><input id="policy-allowed" type="checkbox" checked> Allow this provider; clear to deny it explicitly</label>
+                <label class="acknowledgement"><input id="policy-acknowledged" type="checkbox"> I have verified the provider, model, purposes, classification ceiling, residency, and retention shown above.</label>
+                <button class="button button-primary align-start" type="submit">Save and verify authorization</button>
+              </form>
+              <div id="policy-list" class="admin-list empty-state"><p>No policies loaded.</p></div>
+            </article>
+          </div>
+
+          <article class="card operation-disclosure">
+            <div class="card-heading"><div><span class="card-kicker">Per operation</span><h2>When AI is contacted</h2></div></div>
+            <div class="table-wrap"><table><thead><tr><th>Operation</th><th>AI call</th><th>Possible content</th></tr></thead><tbody>
+              <tr><td>Connection, introspection, and Schema Explorer</td><td>No</td><td>Nothing</td></tr>
+              <tr><td>SQL generation</td><td>Yes</td><td>Question, constraints, and governed context</td></tr>
+              <tr><td>Semantic retry</td><td>Possible second call</td><td>The same already-filtered context</td></tr>
+              <tr><td>Validation, EXPLAIN, approval, and execution</td><td>No</td><td>Nothing is sent to the AI provider</td></tr>
+              <tr><td>Results, masking, and provenance</td><td>No</td><td>Database rows remain local</td></tr>
+            </tbody></table></div>
+          </article>
+        </section>
+
+        <section id="panel-query" class="panel" data-panel-view="query" hidden>
+          <div class="page-heading">
+            <div>
+              <span class="eyebrow">Governed workflow</span>
+              <h1>Query your data</h1>
+              <p>From question to SQL: context, validation, plan, approval, and results remain visible.</p>
+            </div>
+            <div class="page-actions"><button class="button button-quiet help-trigger" type="button" data-help="query">Explain this page</button><span class="step-badge">Step 5 of 6</span></div>
+          </div>
+
+          <div class="page-summary" role="note" aria-label="Purpose and outcome">
+            <div><span>Purpose</span><strong>Turn a question into reviewed read-only SQL.</strong></div>
+            <div><span>You need</span><strong>Catalog, provider, and effective sharing policy.</strong></div>
+            <div><span>Outcome</span><strong>A local result with privacy and provenance.</strong></div>
+          </div>
+
+          <ol class="trust-path" aria-label="Query trust boundaries">
+            <li><span>1</span><strong>Local sharing check</strong><small>No AI call</small></li>
+            <li><span>2</span><strong>Generate proposal</strong><small>AI call</small></li>
+            <li><span>3</span><strong>Inspect plan</strong><small>Database, no rows</small></li>
+            <li><span>4</span><strong>Approve exact query</strong><small>Human decision</small></li>
+            <li><span>5</span><strong>Execute read-only</strong><small>Local result</small></li>
+          </ol>
+
+          <div id="query-privacy-setup" class="setup-card" role="alert" hidden>
+            <div><strong>Privacy setup is incomplete</strong><p id="query-privacy-setup-message">Create or review the effective policy before sending content to a provider.</p></div>
+            <button id="open-privacy-setup" class="button button-secondary" type="button">Open Privacy &amp; AI</button>
+          </div>
+
+          <div id="query-privacy-indicators" class="privacy-indicators" aria-live="polite">
+            <span id="query-provider-indicator">Provider: —</span>
+            <span id="query-policy-indicator">Policy: —</span>
+            <span id="query-classification-indicator">Classification: internal</span>
+            <span id="query-call-indicator">AI calls: maximum 1</span>
+          </div>
+
+          <article class="card query-composer">
+            <form id="query-form" class="form-stack">
+              <div class="query-settings">
+                <div><label for="provider-select">LLM provider</label><input id="provider-select" list="provider-options" type="text" maxlength="200" placeholder="e.g. anthropic, gemini, or kimi" required><datalist id="provider-options"></datalist></div>
+                <div><label for="classification-select">Question classification</label><select id="classification-select">
+                  <option value="public">Public</option><option value="internal" selected>Internal</option>
+                  <option value="confidential">Confidential</option><option value="pii">PII</option>
+                  <option value="highly_sensitive">Highly sensitive</option>
+                </select><span class="field-help">The server may raise this level after its own local classification.</span></div>
+                <div><label for="privacy-mode-select">Interpretation privacy</label><select id="privacy-mode-select">
+                  <option value="maximum_privacy" selected>Maximum privacy · one AI call</option>
+                  <option value="governed_semantic">Governed semantics · up to two AI calls</option>
+                </select><span class="field-help">Semantic mode may send the same already-filtered context a second time.</span></div>
+              </div>
+              <label for="question-input">What would you like to know?</label>
+              <textarea id="question-input" rows="4" maxlength="10000" required
+                placeholder="Show total orders by month for the last six months"></textarea>
+              <div class="button-row">
+                <button id="preflight-button" class="button button-primary" type="submit">1 · Check what AI would receive</button>
+                <span class="field-help">Database rows are never sent to AI. Values typed into the question are part of the prompt.</span>
+              </div>
+            </form>
+          </article>
+
+          <article id="ai-preflight" class="card preflight-card" hidden aria-live="polite">
+            <div class="card-heading">
+              <div><span class="card-kicker">Local dry run</span><h2 id="preflight-title">Transfer not performed</h2></div>
+              <span id="preflight-status" class="status-badge">provider not invoked</span>
+            </div>
+            <p id="preflight-summary" class="intent-summary"></p>
+            <p id="preflight-actions" class="field-help"></p>
+            <div id="preflight-meta" class="meta-stack"></div>
+            <details class="disclosure"><summary>Exact included and redacted manifest</summary><div id="preflight-manifest" class="manifest-list"></div></details>
+            <div class="button-row">
+              <button id="confirm-ai-transfer" class="button button-danger" type="button">2 · Send and generate SQL</button>
+              <button id="cancel-ai-transfer" class="button button-quiet" type="button">Cancel</button>
+            </div>
+          </article>
+
+          <div id="query-workflow" class="workflow" hidden>
+            <article id="ai-transfer-receipt" class="card transfer-receipt" hidden>
+              <div class="card-heading"><div><span class="card-kicker">AI receipt</span><h2>Transfer recorded without prompt content</h2></div><span class="status-badge" data-state="ok">sent</span></div>
+              <div id="ai-transfer-receipt-meta" class="meta-stack"></div>
+            </article>
+            <div class="workflow-track" aria-label="Query status">
+              <span class="workflow-step is-current" data-stage="proposal">Proposal ready</span>
+              <span class="workflow-step" data-stage="explain">Database plan</span>
+              <span class="workflow-step" data-stage="approval">Human approval</span>
+              <span class="workflow-step" data-stage="execution">Local result</span>
+            </div>
+
+            <article class="card intent-card">
+              <div class="card-heading">
+                <div><span class="card-kicker">Interpretation</span><h2>How SQLVerity AI understood the request</h2></div>
+                <span id="intent-badge" class="status-badge">—</span>
+              </div>
+              <p id="intent-summary" class="intent-summary">Waiting for a proposal.</p>
+              <div id="intent-meta" class="meta-stack"></div>
+              <div id="intent-entities" class="intent-entities"></div>
+              <div id="intent-ambiguities" class="validation-list" hidden></div>
+              <form id="intent-correction-form" class="intent-conversation">
+                <label for="intent-correction-text">
+                  Correct the interpretation in your own words
+                  <span>For example: “By customer name I mean the description column.”</span>
+                </label>
+                <div class="intent-conversation-fields">
+                  <textarea
+                    id="intent-correction-text"
+                    rows="2"
+                    maxlength="10000"
+                    placeholder="Explain what was interpreted incorrectly and the intended meaning"
+                    required
+                  ></textarea>
+                  <button id="interpret-correction" class="button button-secondary" type="submit">
+                    Interpret and remember
+                  </button>
+                </div>
+                <div id="intent-correction-result" class="intent-correction-result" hidden></div>
+              </form>
+            </article>
+
+            <div class="grid grid-two query-grid">
+              <article class="card">
+                <div class="card-heading">
+                  <div><span class="card-kicker">Proposed SQL</span><h2 id="request-state">—</h2></div>
+                  <button id="copy-sql" class="button button-quiet" type="button">Copy</button>
+                </div>
+                <pre id="sql-output" class="code-output"><code></code></pre>
+                <div id="proposal-meta" class="meta-stack"></div>
+              </article>
+              <article class="card">
+                <div class="card-heading"><div><span class="card-kicker">Safety check</span><h2>Validation</h2></div><span id="validation-badge" class="status-badge">—</span></div>
+                <div id="validation-result" class="validation-list empty-state"><p>Waiting for a proposal.</p></div>
+              </article>
+            </div>
+
+            <article id="parameter-section" class="card parameter-card" hidden>
+              <div class="card-heading">
+                <div><span class="card-kicker">Governed binding</span><h2>Query parameters</h2></div>
+                <span class="privacy-pill">values are not persisted</span>
+              </div>
+              <p class="field-help">The same values must be used for EXPLAIN, approval, and execution.</p>
+              <div id="parameter-fields" class="parameter-fields"></div>
+            </article>
+
+            <article class="card action-card">
+              <div class="action-copy"><span class="card-kicker">Human in the loop</span><h2>Review before proceeding</h2><p id="action-hint">Request the database plan to estimate cost and rows.</p></div>
+              <div class="button-row">
+                <button id="explain-button" class="button button-primary" type="button">3 · Inspect database plan</button>
+                <button id="semantic-retry-button" class="button button-quiet" type="button" disabled>Retry with governed semantics</button>
+                <button id="approve-button" class="button button-secondary" type="button" disabled>4 · Approve exact query</button>
+                <button id="execute-button" class="button button-danger" type="button" disabled>5 · Execute read-only</button>
+              </div>
+            </article>
+
+            <div id="explain-section" class="grid grid-two" hidden>
+              <article class="card metric-panel">
+                <div><span class="metric-label">Estimated cost</span><strong id="estimated-cost">—</strong></div>
+                <div><span class="metric-label">Estimated rows</span><strong id="estimated-rows">—</strong></div>
+                <div><span class="metric-label">EXPLAIN time</span><strong id="explain-time">—</strong></div>
+              </article>
+              <article class="card"><div class="card-heading"><div><span class="card-kicker">Query plan</span><h2>Plan</h2></div></div><pre id="plan-output" class="code-output compact"><code></code></pre></article>
+            </div>
+
+            <article id="result-section" class="card result-section" hidden>
+              <div class="card-heading"><div><span class="card-kicker">Local result</span><h2 id="result-summary">—</h2></div><span id="privacy-badge" class="privacy-pill">deterministic</span></div>
+              <div id="result-table" class="table-wrap"></div>
+              <details class="provenance"><summary>Provenance and privacy</summary><pre id="provenance-output" class="code-output compact"><code></code></pre></details>
+            </article>
+          </div>
+        </section>
+
+        <section id="panel-admin" class="panel" data-panel-view="admin" hidden>
+          <div class="page-heading">
+            <div>
+              <span class="eyebrow">Operational governance</span>
+              <h1>Administer access and operations</h1>
+              <p>Federated provisioning, egress control, connection tests, and durable jobs.</p>
+            </div>
+            <div class="page-actions"><button class="button button-quiet help-trigger" type="button" data-help="administration">Explain this page</button><button id="refresh-admin" class="button button-primary" type="button">Refresh</button><span class="step-badge">Step 6 of 6</span></div>
+          </div>
+
+          <div class="page-summary" role="note" aria-label="Purpose and outcome">
+            <div><span>Purpose</span><strong>Manage identities and audited operations.</strong></div>
+            <div><span>You need</span><strong>Tenant administration or stewardship rights.</strong></div>
+            <div><span>Outcome</span><strong>Narrow access and observable background work.</strong></div>
+          </div>
+
+          <div class="grid grid-two">
+            <article class="card">
+              <div class="card-heading"><div><span class="card-kicker">Identity</span><h2>New SSO user</h2></div></div>
+              <form id="federated-principal-form" class="form-stack">
+                <label for="federated-subject">Subject OIDC</label>
+                <input id="federated-subject" maxlength="500" autocomplete="off" required placeholder="Immutable sub identifier">
+                <label for="federated-display-name">Display name</label>
+                <input id="federated-display-name" maxlength="500" required placeholder="Ada Lovelace">
+                <label for="federated-role">Role</label>
+                <select id="federated-role">
+                  <option value="viewer">Viewer</option>
+                  <option value="analyst">Analyst</option>
+                  <option value="data_steward">Data steward</option>
+                  <option value="admin">Tenant admin</option>
+                </select>
+                <p id="federated-role-help" class="choice-explanation">Viewer: read-only access to governed metadata; cannot use Query Studio.</p>
+                <label class="checkbox-label"><input id="federated-source-scope" type="checkbox"> Limit access to the selected data source</label>
+                <button class="button button-primary align-start" type="submit">Provision identity</button>
+              </form>
+              <div id="principal-list" class="admin-list empty-state"><p>Load a tenant you may administer.</p></div>
+            </article>
+
+            <article class="card card-accent">
+              <div class="card-heading"><div><span class="card-kicker">AI egress</span><h2>Authorization is separate from administration</h2></div></div>
+              <p class="field-help">First-use authorization and privacy reviews belong in the dedicated step before Query Studio. Identity and operational controls remain here.</p>
+              <button id="open-privacy-admin" class="button button-secondary align-start" type="button">Open Privacy &amp; AI</button>
+            </article>
+          </div>
+
+          <article class="card">
+            <div class="card-heading"><div><span class="card-kicker">Operations</span><h2>Connection and background jobs</h2></div></div>
+            <div class="operation-settings">
+              <div>
+                <label for="inference-provider">AI provider for schema description inference</label>
+                <input id="inference-provider" list="provider-options" maxlength="100" placeholder="Select an authorized provider">
+                <p class="field-help">Requires the “Schema description inference” purpose in Privacy &amp; AI.</p>
+              </div>
+            </div>
+            <div class="button-row">
+              <button id="test-connection" class="button button-secondary" type="button">Test selected source connection</button>
+              <button id="enqueue-inference" class="button button-primary" type="button">Queue schema description inference</button>
+            </div>
+            <p class="field-help">The connection test reads and validates metadata but does not create a catalog version. Inference is a separate AI-backed background job.</p>
+            <div id="admin-operation-result" class="result-callout" hidden></div>
+            <h3 class="section-label">Recent background jobs</h3>
+            <div id="job-list" class="admin-list empty-state"><p>No jobs loaded.</p></div>
+          </article>
+        </section>
+      </main>
+    </div>
+
+    <div id="help-backdrop" class="help-backdrop" hidden></div>
+    <aside id="help-drawer" class="help-drawer" role="dialog" aria-modal="true" aria-labelledby="help-title" aria-hidden="true" hidden>
+      <div class="help-header">
+        <div><span class="eyebrow">In-product guidance</span><h2 id="help-title">Help and guidance</h2></div>
+        <button id="close-help" class="button button-quiet" type="button" aria-label="Close help">Close</button>
+      </div>
+      <label for="help-search">Search topics</label>
+      <input id="help-search" type="search" placeholder="Search privacy, EXPLAIN, roles…" autocomplete="off">
+      <nav id="help-topic-list" class="help-topic-list" aria-label="Help topics"></nav>
+      <article id="help-content" class="help-content" tabindex="-1"></article>
+    </aside>
+  </body>
+</html>

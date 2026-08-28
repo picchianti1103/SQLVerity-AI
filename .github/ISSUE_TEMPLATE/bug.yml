@@ -1,0 +1,64 @@
+name: Bug report
+description: Report a reproducible SQLVerity AI defect using synthetic, non-sensitive data.
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        Do not include credentials, private schemas, prompts, result rows, or vulnerability details.
+        Use the private process in SECURITY.md for security reports.
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      placeholder: 0.1.0 or commit SHA
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Catalog or ingestion
+        - Semantic governance
+        - Context or SQL generation
+        - SQL validation or execution
+        - Privacy, provenance, or FinOps
+        - Authentication or authorization
+        - Web console
+        - Packaging or deployment
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Use a synthetic schema and redact all secrets.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, Python version, database dialect, provider id, and installation extras.
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Data safety
+      options:
+        - label: I removed credentials, private data, and vulnerability details.
+          required: true

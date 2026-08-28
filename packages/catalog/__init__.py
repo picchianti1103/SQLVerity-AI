@@ -1,0 +1,2 @@
+"""Semantic catalog package container."""
+

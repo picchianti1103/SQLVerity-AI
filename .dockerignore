@@ -1,0 +1,15 @@
+.git
+.github
+.artifacts
+.mypy_cache
+.pytest_cache
+.ruff_cache
+.venv
+*.egg-info
+*.py[cod]
+*.sqlite3
+.env
+build
+dist
+tests
+*.docx
