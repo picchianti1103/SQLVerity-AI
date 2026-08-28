@@ -95,7 +95,7 @@ dev = [
   "psycopg-pool>=3,<4",
   "pytest",
   "ruff",
-  "twine>=6,<7",
+  "twine>=6,<8",
 ]
 
 [tool.setuptools.packages.find]
