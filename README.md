@@ -10,6 +10,10 @@ SQLVerity AI turns natural-language questions into SQL that people can inspect, 
 run safely. It is designed for organizations that want the usefulness of AI-assisted querying
 without giving a model uncontrolled access to their databases.
 
+**New here?** Follow the [10-minute guided quickstart](docs/quickstart.md) with the bundled synthetic
+PostgreSQL database. No production database or LLM credential is required to inspect the governed
+catalog path.
+
 The platform supports PostgreSQL, MySQL, MariaDB, Oracle, and SQL Server. LLM providers are
 optional and disabled by default.
 
@@ -32,6 +36,15 @@ The core flow is:
 ```text
 question -> governed context -> SQL proposal -> validation -> EXPLAIN -> approval -> read-only result
 ```
+
+## Who it is for
+
+SQLVerity AI is for data teams that need natural-language access to relational data but cannot treat
+generated SQL as trusted output. It is especially relevant when reviewers need to see what metadata
+left the system, which SQL was approved, and why a query was allowed to run.
+
+It is not a zero-configuration chatbot, a write-capable database agent, or a replacement for database
+permissions and organizational review.
 
 ## First run with Docker
 
@@ -65,6 +78,9 @@ docker compose down
 
 The demo works without enabling an LLM: bundled schemas can be imported and explored locally.
 Provider calls require an explicit provider selection, credentials, and an egress policy.
+
+For the exact demo source values, validation checks, and sample questions, continue with the
+[guided quickstart](docs/quickstart.md).
 
 ## Native development
 
@@ -116,16 +132,27 @@ delivered capabilities and known gaps.
 
 ## Documentation
 
+- [Guided quickstart](docs/quickstart.md) — reach a verified demo catalog and, optionally, a first AI-assisted query.
+- [Early-adopter guide](docs/early-adopter-guide.md) — a focused 30-minute evaluation and feedback format.
+- [Roadmap](ROADMAP.md) — adoption milestones, near-term priorities, and explicit non-goals.
 - [Configuration reference](docs/configuration.md) — providers, databases, secrets, and production
   settings.
 - [Implementation status](docs/implementation-status.md) — delivered capabilities and known gaps.
 - [Architecture decisions](docs/adr) — the reasoning behind the main technical boundaries.
 - [Operations runbook](docs/operations-runbook.md) — health, observability, incidents, and recovery.
 - [Migration and rollback](docs/migration-and-rollback.md) — safe catalog upgrades.
+- [Release process](docs/releasing.md) — trusted Python and container publication.
 - [Contributing](CONTRIBUTING.md) — development setup, tests, and design expectations.
 - [Changelog](CHANGELOG.md) — release and delivery history.
 - [Security policy](SECURITY.md) — private vulnerability reporting.
 - [Maintainers](MAINTAINERS.md) — project ownership and release responsibility.
+
+## Feedback
+
+The most useful contribution at this stage is a real use case tested against synthetic or redacted
+metadata. Use the [early-adopter feedback form](https://github.com/picchianti1103/SQLVerity-AI/issues/new?template=early-adopter.yml)
+to report where setup, trust, or query review becomes unclear. Bugs and feature requests have separate
+issue forms. Never include credentials, private schemas, prompts, result rows, or vulnerability details.
 
 ## License
 
