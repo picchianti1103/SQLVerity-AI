@@ -1,4 +1,4 @@
-FROM python:3.12-slim@sha256:2c941e860699f878900b0edc2403613c234d4b32eda3cc9fa7036991a2a63c4a AS builder
+FROM python:3.12-slim@sha256:09f7da3bc104798d0afb40bc08d23ab2da20a76130cec1f2ef170848f5d85217 AS builder
 
 ARG SQLVERITY_EXTRAS=postgres,openai,identity,secrets,observability
 
@@ -13,7 +13,7 @@ COPY packages ./packages
 
 RUN python -m pip wheel --no-cache-dir --wheel-dir /wheels ".[${SQLVERITY_EXTRAS}]"
 
-FROM python:3.12-slim@sha256:2c941e860699f878900b0edc2403613c234d4b32eda3cc9fa7036991a2a63c4a AS runtime
+FROM python:3.12-slim@sha256:09f7da3bc104798d0afb40bc08d23ab2da20a76130cec1f2ef170848f5d85217 AS runtime
 
 ARG SQLVERITY_EXTRAS=postgres,openai,identity,secrets,observability
 
