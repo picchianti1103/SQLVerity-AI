@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from hashlib import sha256
 from typing import Protocol
 
 from packages.authorized_query.sqlverity_authorized_query import (
@@ -30,6 +31,10 @@ from packages.domain.sqlverity_domain.models import (
     QueryRequest,
     QueryRequestState,
     SchemaObject,
+)
+from packages.domain.sqlverity_domain.query_state import (
+    QueryCostPolicyChangedError,
+    QueryRequestConflictError,
 )
 from packages.result_engine.sqlverity_result_engine import (
     DeterministicAnswer,
@@ -171,6 +176,7 @@ class QueryExecutionService:
         request_id: str,
         actor_id: str,
         parameters: Mapping[str, object] | None = None,
+        expected_explain_revision: int | None = None,
     ) -> QueryRequest:
         query_request, data_source = self._load(tenant_id, data_source_id, request_id)
         if query_request.state is not QueryRequestState.READY_FOR_PREVIEW:
@@ -178,8 +184,13 @@ class QueryExecutionService:
                 "Only a query ready for preview can be approved"
             )
         prepared = self._prepare(query_request, data_source, parameters)
+        if (
+            expected_explain_revision is not None
+            and expected_explain_revision != query_request.explain_revision
+        ):
+            raise QueryExecutionStaleError("EXPLAIN revision changed; review the current plan")
         self._enforce_parameter_binding(query_request, data_source, prepared)
-        self._enforce_execution_cost_policy(query_request)
+        policy_revision = self._enforce_execution_cost_policy(query_request)
         if DataSourceCapability.EXECUTE_READ_ONLY not in data_source.capabilities:
             raise QueryExecutionUnavailableError(
                 "DataSource does not allow read-only execution"
@@ -189,12 +200,19 @@ class QueryExecutionService:
                 "DataSource has no connection secret reference"
             )
         self._executor(data_source)
-        return self._catalog.transition_query_request(
-            tenant_id,
-            request_id,
-            QueryRequestState.APPROVED,
-            actor_id=actor_id,
-        )
+        try:
+            return self._catalog.transition_query_request(
+                tenant_id,
+                request_id,
+                QueryRequestState.APPROVED,
+                actor_id=actor_id,
+                expected_explain_revision=query_request.explain_revision,
+                expected_cost_policy_revision=policy_revision,
+                approval_sql_hash=sha256(prepared.sql.encode("utf-8")).hexdigest(),
+                approval_parameter_value_hash=prepared.parameter_value_hash,
+            )
+        except QueryRequestConflictError as error:
+            raise QueryExecutionStaleError(str(error)) from error
 
     def explain(
         self,
@@ -205,16 +223,11 @@ class QueryExecutionService:
         parameters: Mapping[str, object] | None = None,
     ) -> ExplainResult:
         query_request, data_source = self._load(tenant_id, data_source_id, request_id)
-        if query_request.state not in {
-            QueryRequestState.READY_FOR_PREVIEW,
-            QueryRequestState.APPROVED,
-        }:
+        if query_request.state is not QueryRequestState.READY_FOR_PREVIEW:
             raise QueryExecutionStateError(
-                "EXPLAIN requires a query ready for preview or already approved"
+                "EXPLAIN requires a query ready for preview"
             )
         prepared = self._prepare(query_request, data_source, parameters)
-        if query_request.state is QueryRequestState.APPROVED:
-            self._enforce_parameter_binding(query_request, data_source, prepared)
         executor = self._executor(data_source)
         result = executor.explain(
             data_source,
@@ -223,19 +236,19 @@ class QueryExecutionService:
             prepared.parameters,
             timeout_seconds=self._timeout_seconds,
         )
-        self._catalog.record_query_activity(
-            tenant_id,
-            request_id,
-            "query.explained",
-            {
-                "estimated_total_cost": result.estimated_total_cost,
-                "estimated_rows": result.estimated_rows,
-                "elapsed_ms": result.elapsed_ms,
-                "parameter_names": prepared.parameter_names,
-                "parameter_value_hash": prepared.parameter_value_hash,
-            },
-        )
-        return result
+        try:
+            saved = self._catalog.record_query_explain(
+                tenant_id,
+                request_id,
+                expected_revision=query_request.explain_revision,
+                sql_hash=sha256(prepared.sql.encode("utf-8")).hexdigest(),
+                parameter_value_hash=prepared.parameter_value_hash,
+                parameter_names=prepared.parameter_names,
+                result=result,
+            )
+        except QueryRequestConflictError as error:
+            raise QueryExecutionStaleError(str(error)) from error
+        return replace(result, revision=saved.explain_revision)
 
     def execute(
         self,
@@ -250,12 +263,33 @@ class QueryExecutionService:
             raise QueryExecutionStateError("Read-only execution requires explicit approval")
         prepared = self._prepare(query_request, data_source, parameters)
         self._enforce_parameter_binding(query_request, data_source, prepared)
+        if (
+            query_request.approved_sql_hash != sha256(prepared.sql.encode("utf-8")).hexdigest()
+            or query_request.approved_parameter_value_hash != prepared.parameter_value_hash
+            or query_request.approved_explain_revision != query_request.explain_revision
+        ):
+            raise QueryExecutionStaleError("Approved SQL or bindings changed; regenerate the query")
         executor = self._executor(data_source)
-        executing = self._catalog.transition_query_request(
-            tenant_id,
-            request_id,
-            QueryRequestState.EXECUTING,
-        )
+        try:
+            policy_revision = self._enforce_execution_cost_policy(query_request, executing=True)
+            executing = self._catalog.transition_query_request(
+                tenant_id,
+                request_id,
+                QueryRequestState.EXECUTING,
+                expected_explain_revision=query_request.explain_revision,
+                expected_cost_policy_revision=policy_revision,
+            )
+        except QueryCostPolicyChangedError as error:
+            # Reopen only a still-approved request bound to an obsolete policy.
+            try:
+                self._catalog.transition_query_request(
+                    tenant_id, request_id, QueryRequestState.READY_FOR_PREVIEW,
+                )
+            except QueryRequestConflictError:
+                pass
+            raise QueryExecutionStaleError(str(error)) from error
+        except QueryRequestConflictError as error:
+            raise QueryExecutionStaleError(str(error)) from error
         try:
             result = executor.execute_read_only(
                 data_source,
@@ -352,11 +386,14 @@ class QueryExecutionService:
                 raise QueryExecutionUnavailableError("DataSource does not support cancellation")
             if not self._executor(data_source).cancel(request_id):
                 raise QueryExecutionUnavailableError("Active database query could not be cancelled")
-        return self._catalog.transition_query_request(
-            tenant_id,
-            request_id,
-            QueryRequestState.CANCELLED,
-        )
+        try:
+            return self._catalog.transition_query_request(
+                tenant_id,
+                request_id,
+                QueryRequestState.CANCELLED,
+            )
+        except QueryRequestConflictError as error:
+            raise QueryExecutionStateError(str(error)) from error
 
     def _load(
         self,
@@ -524,13 +561,20 @@ class QueryExecutionService:
             query_request.llm_usage_event_id,
         )
 
-    def _enforce_execution_cost_policy(self, query_request: QueryRequest) -> None:
+    def _enforce_execution_cost_policy(
+        self, query_request: QueryRequest, *, executing: bool = False,
+    ) -> int:
         policy = self._catalog.get_execution_cost_policy(
             query_request.tenant_id,
             query_request.data_source_id,
         )
+        revision = policy.revision if policy is not None else 0
+        if executing and query_request.approved_cost_policy_revision != revision:
+            raise QueryCostPolicyChangedError(
+                "Execution cost policy changed; review and approve again"
+            )
         if policy is None:
-            return
+            return revision
         if policy.require_explain and query_request.explained_at is None:
             raise QueryExecutionPolicyBlockedError(
                 "Execution cost policy requires EXPLAIN before approval"
@@ -553,6 +597,7 @@ class QueryExecutionService:
                 raise QueryExecutionPolicyBlockedError(
                     "Planner row estimate exceeds the DataSource execution threshold"
                 )
+        return revision
 
     @staticmethod
     def _enforce_parameter_binding(

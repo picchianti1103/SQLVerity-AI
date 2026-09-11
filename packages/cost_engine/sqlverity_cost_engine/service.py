@@ -6,10 +6,31 @@ from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Protocol
 
+from packages.domain.sqlverity_domain.budget import (
+    LLMBudgetBalance,
+    LLMBudgetReservation,
+    month_bounds,
+)
 from packages.domain.sqlverity_domain.models import LLMUsageEvent, ModelPricing, TenantBudget
 
 
 class FinOpsRepository(Protocol):
+    def reserve_llm_budget(self, reservation: LLMBudgetReservation) -> LLMBudgetReservation: ...
+
+    def start_llm_budget_reservation(self, tenant_id: str, reservation_id: str) -> None: ...
+
+    def mark_llm_budget_uncertain(self, tenant_id: str, reservation_id: str) -> None: ...
+
+    def release_undispatched_llm_budget(self, tenant_id: str, reservation_id: str) -> None: ...
+
+    def settle_llm_budget_reservation(
+        self, tenant_id: str, reservation_id: str, usage: LLMUsageEvent,
+    ) -> None: ...
+
+    def llm_budget_balance(
+        self, tenant_id: str, currency: str, period_start: datetime, period_end: datetime,
+    ) -> LLMBudgetBalance: ...
+
     def get_effective_model_pricing(
         self,
         tenant_id: str,
@@ -55,6 +76,7 @@ class BudgetDecision:
     projected_amount: Decimal
     remaining_amount: Decimal | None
     reason: str
+    reserved_amount: Decimal = Decimal("0")
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,11 +104,38 @@ class FinOpsSummary:
     priced_event_count: int
     unpriced_event_count: int
     breakdown: tuple[UsageBreakdown, ...]
+    reserved_cost: Decimal = Decimal("0")
+    uncertain_cost: Decimal = Decimal("0")
+    reconciled_cost: Decimal = Decimal("0")
 
 
 class FinOpsService:
     def __init__(self, repository: FinOpsRepository) -> None:
         self._repository = repository
+
+    def reserve(
+        self, tenant_id: str, provider_id: str, model_id: str, estimate: CostEstimate,
+        *, at: datetime | None = None,
+    ) -> LLMBudgetReservation:
+        now = at or datetime.now(UTC)
+        start, end = month_bounds(now)
+        return self._repository.reserve_llm_budget(LLMBudgetReservation(
+            tenant_id=tenant_id, provider_id=provider_id, model_id=model_id,
+            pricing_id=estimate.pricing_id, currency=estimate.currency, amount=estimate.amount,
+            period_start=start, period_end=end, created_at=now, updated_at=now,
+        ))
+
+    def start(self, reservation: LLMBudgetReservation) -> None:
+        self._repository.start_llm_budget_reservation(reservation.tenant_id, reservation.id)
+
+    def uncertain(self, reservation: LLMBudgetReservation) -> None:
+        self._repository.mark_llm_budget_uncertain(reservation.tenant_id, reservation.id)
+
+    def release_undispatched(self, reservation: LLMBudgetReservation) -> None:
+        self._repository.release_undispatched_llm_budget(reservation.tenant_id, reservation.id)
+
+    def settle(self, reservation: LLMBudgetReservation, usage: LLMUsageEvent) -> None:
+        self._repository.settle_llm_budget_reservation(reservation.tenant_id, reservation.id, usage)
 
     def estimate(
         self,
@@ -149,14 +198,15 @@ class FinOpsService:
             estimate.currency,
             effective_at,
         )
-        period_start, period_end = _month_bounds(effective_at)
-        spent = self._spent(
+        period_start, period_end = month_bounds(effective_at)
+        balance = self._repository.llm_budget_balance(
             tenant_id,
             estimate.currency,
             period_start,
             period_end,
         )
-        projected = spent + estimate.amount
+        spent = balance.spent
+        projected = spent + balance.reserved + estimate.amount
         if budget is None:
             return BudgetDecision(
                 allowed=True,
@@ -167,6 +217,7 @@ class FinOpsService:
                 projected_amount=projected,
                 remaining_amount=None,
                 reason="No active tenant budget is configured",
+                reserved_amount=balance.reserved,
             )
         remaining = budget.amount - projected
         return BudgetDecision(
@@ -182,6 +233,7 @@ class FinOpsService:
                 if projected <= budget.amount
                 else "Projected monthly cost exceeds budget"
             ),
+            reserved_amount=balance.reserved,
         )
 
     def has_active_budget(
@@ -209,7 +261,7 @@ class FinOpsService:
         at: datetime | None = None,
     ) -> FinOpsSummary:
         effective_at = at or datetime.now(UTC)
-        period_start, period_end = _month_bounds(effective_at)
+        period_start, period_end = month_bounds(effective_at)
         budget = self._repository.get_effective_tenant_budget(
             tenant_id,
             currency,
@@ -248,9 +300,12 @@ class FinOpsService:
             )
             for key, values in sorted(aggregates.items())
         )
-        total = sum((item.cost for item in breakdown), Decimal("0"))
+        balance = self._repository.llm_budget_balance(
+            tenant_id, currency, period_start, period_end,
+        )
+        total = balance.spent
         remaining = (
-            max(Decimal("0"), budget.amount - total)
+            max(Decimal("0"), budget.amount - total - balance.reserved)
             if budget is not None
             else None
         )
@@ -266,23 +321,10 @@ class FinOpsService:
             priced_event_count=priced_event_count,
             unpriced_event_count=unpriced_event_count,
             breakdown=breakdown,
+            reserved_cost=balance.reserved,
+            uncertain_cost=balance.uncertain,
+            reconciled_cost=balance.reconciled,
         )
-
-    def _spent(
-        self,
-        tenant_id: str,
-        currency: str,
-        period_start: datetime,
-        period_end: datetime,
-    ) -> Decimal:
-        total = Decimal("0")
-        for event in self._repository.list_llm_usage_events(tenant_id):
-            if period_start <= event.created_at < period_end:
-                cost = _event_cost(event, currency)
-                if cost is not None:
-                    total += cost
-        return total
-
 
 def _event_cost(event: LLMUsageEvent, currency: str) -> Decimal | None:
     if event.currency != currency:
@@ -295,23 +337,6 @@ def _event_cost(event: LLMUsageEvent, currency: str) -> Decimal | None:
     except InvalidOperation:
         return None
     return amount if amount >= 0 else None
-
-
-def _month_bounds(value: datetime) -> tuple[datetime, datetime]:
-    if value.tzinfo is None:
-        raise ValueError("FinOps timestamps must be timezone-aware")
-    start = value.astimezone(UTC).replace(
-        day=1,
-        hour=0,
-        minute=0,
-        second=0,
-        microsecond=0,
-    )
-    if start.month == 12:
-        end = start.replace(year=start.year + 1, month=1)
-    else:
-        end = start.replace(month=start.month + 1)
-    return start, end
 
 
 def _decimal_text(value: Decimal) -> str:

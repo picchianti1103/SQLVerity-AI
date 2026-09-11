@@ -11,6 +11,14 @@ outputs whenever a query also reads a sensitive column.
 
 ## Decision
 
+The September 2026 [remediation](../review-remediation-2026-09.md) strengthens this decision with
+immutable EXPLAIN revisions, conditional approval, independent approval digests, and exact
+physical/output identifier matching. EXPLAIN can no longer modify an approved ticket.
+Projection names must be unique; multi-column projections require columns or explicit aliases
+for every output. Shared driver helpers reject duplicate metadata before converting any rows.
+This preserves the named-result contract without silently renaming approved outputs. A single
+unnamed expression remains supported with conservative lineage handling.
+
 Structured SQL proposals may declare up to 50 uniquely named scalar parameters. The supported
 portable types are string, integer, number, boolean, ISO date, ISO datetime, and UUID. SQL must use
 matching named `:parameter` placeholders; positional, undeclared, unused, LIMIT, and OFFSET bindings

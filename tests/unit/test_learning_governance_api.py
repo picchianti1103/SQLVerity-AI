@@ -186,7 +186,8 @@ class LearningGovernanceAPITests(unittest.TestCase):
                     )
                     self.assertEqual(
                         export_body["candidates"][0]["normalized_sql"],
-                        "SELECT id, total_amount FROM public.orders LIMIT 500",
+                        'SELECT "orders"."id", "orders"."total_amount" '
+                        'FROM "public"."orders" LIMIT 500',
                     )
 
 

@@ -15,6 +15,28 @@ public release is tagged.
 
 ### Changed
 
+- Reject duplicate SQL output names in validation and shared driver metadata handling, preserving
+  every value when callers use distinct aliases.
+- Add authenticated, permission-filtered session discovery so DataSource-scoped users can use the
+  console without tenant roles; expose only authorized sources and permitted actions.
+- Protect console requests against stale session, tenant, source, and query completions, including
+  errors and button state; add deferred-response and real-browser regressions to CI.
+- Reserve priced LLM calls transactionally before provider I/O; include pending and uncertain
+  charges in the available budget, settle usage atomically, and expose audited FinOps reconciliation.
+- Separate request concurrency leases from rate windows, renew them through response completion,
+  and ignore expired or duplicate releases. Configure TTL with `SQLVERITY_REQUEST_LEASE_SECONDS`.
+- Bind query approval to the DB cost policy revision and recheck it at execution admission.
+  Policy changes reopen preview and require approval again; the console refreshes the ticket state.
+- Add migration `0018` and shared SQLite/PostgreSQL races for budgets, leases, and cost policies.
+  Live PostgreSQL validation also fixed nullable scope parameters and boolean lineage persistence.
+
+- Bound normalized SQL to exact physical catalog identifiers and explicit schemas, preserving
+  quoted case through DDL import, output lineage, and result masking.
+- Made EXPLAIN revisions immutable and approval conditional on the reviewed revision; execution
+  verifies independent SQL/parameter digests. Approval clients must send `expected_explain_revision`
+  after EXPLAIN. See [migration and review remediation](docs/review-remediation-2026-09.md).
+- Added PostgreSQL identity and concurrent approval checks to ordinary CI. Real LLM provider
+  certification remains an explicit manual action.
 - Clarified the intended users, boundaries, and first-run path in the README.
 - Included the roadmap and maintainer policy in source distributions.
 

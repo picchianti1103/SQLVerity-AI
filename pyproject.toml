@@ -94,6 +94,7 @@ dev = [
   "psycopg[binary]>=3,<4",
   "psycopg-pool>=3,<4",
   "pytest",
+  "playwright>=1.62,<2",
   "ruff",
   "twine>=6,<7",
 ]

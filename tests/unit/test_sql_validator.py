@@ -60,9 +60,13 @@ class PostgreSQLSQLValidatorTests(unittest.TestCase):
         )
 
         self.assertTrue(large.accepted)
-        self.assertEqual("SELECT id FROM public.orders LIMIT 500", large.normalized_sql)
+        self.assertEqual(
+            'SELECT "orders"."id" FROM "public"."orders" LIMIT 500', large.normalized_sql,
+        )
         self.assertIn("limit_capped", self._codes(large))
-        self.assertEqual("SELECT id FROM public.orders LIMIT 10", small.normalized_sql)
+        self.assertEqual(
+            'SELECT "orders"."id" FROM "public"."orders" LIMIT 10', small.normalized_sql,
+        )
 
     def test_dynamic_limit_is_rejected_without_preview_sql(self) -> None:
         result = self._validate(

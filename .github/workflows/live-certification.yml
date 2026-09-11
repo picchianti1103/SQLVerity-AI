@@ -1,6 +1,7 @@
 name: Live certification
 
 on:
+  workflow_call:
   workflow_dispatch:
     inputs:
       providers:
@@ -53,7 +54,7 @@ jobs:
         run: python -m pytest -q tests/live/test_postgresql_live.py
 
   providers:
-    if: inputs.providers != ''
+    if: github.event_name == 'workflow_dispatch' && inputs.providers != ''
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment: live-certification

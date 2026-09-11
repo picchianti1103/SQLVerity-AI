@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 
 import sqlglot
 from sqlglot import exp
-from sqlglot.errors import ParseError
+from sqlglot.errors import OptimizeError, ParseError
 from sqlglot.optimizer.scope import Scope, traverse_scope
 
 from packages.domain.sqlverity_domain.contracts import (
@@ -15,6 +15,8 @@ from packages.domain.sqlverity_domain.contracts import (
     ValidationResult,
 )
 from packages.domain.sqlverity_domain.models import OutputColumnLineage
+
+from .identifiers import normalize_identifiers
 
 
 @dataclass(frozen=True, slots=True)
@@ -317,6 +319,7 @@ class DialectSQLValidator:
                 self.capabilities.dialect,
                 ValidationIssue(code="parse_error", message="SQL statement is empty"),
             )
+        normalize_identifiers(statement, self.capabilities.sqlglot_name)
         issues: list[ValidationIssue] = []
         if not isinstance(statement, _READ_ONLY_ROOTS):
             _add_issue(
@@ -367,17 +370,19 @@ class DialectSQLValidator:
                     "Wildcard projections are not allowed; columns must be explicit",
                 )
 
-        referenced_tables, referenced_columns = _resolve_references(
-            statement,
-            allowed_tables,
-            allowed_columns,
-            issues,
-        )
-        output_lineage, output_lineage_complete = _resolve_output_lineage(
-            statement,
-            allowed_tables,
-            allowed_columns,
-        )
+        try:
+            _validate_output_names(statement, issues)
+            referenced_tables, referenced_columns = _resolve_references(
+                statement, allowed_tables, allowed_columns, issues,
+            )
+            output_lineage, output_lineage_complete = _resolve_output_lineage(
+                statement, allowed_tables, allowed_columns,
+            )
+        except OptimizeError:
+            return _rejected(
+                self.capabilities.dialect,
+                ValidationIssue(code="ambiguous_scope", message="SQL source scope is ambiguous"),
+            )
         if frozenset(proposal.tables) != frozenset(referenced_tables):
             _add_issue(
                 issues,
@@ -433,7 +438,9 @@ class DialectSQLValidator:
             )
         return ValidationResult(
             dialect=self.capabilities.dialect,
-            normalized_sql=limited_statement.sql(dialect=self.capabilities.sqlglot_name),
+            normalized_sql=limited_statement.sql(
+                dialect=self.capabilities.sqlglot_name, identify=True,
+            ),
             issues=tuple(issues),
             referenced_tables=tuple(sorted(referenced_tables)),
             referenced_columns=tuple(sorted(referenced_columns)),
@@ -527,118 +534,134 @@ def _resolve_references(
     referenced_columns: set[str] = set()
     columns_by_table: dict[str, set[str]] = {table: set() for table in allowed_tables}
     for column_ref in allowed_columns:
-        if "." not in column_ref:
-            continue
-        table_ref, column_name = column_ref.rsplit(".", 1)
-        columns_by_table.setdefault(table_ref, set()).add(column_name)
+        if "." in column_ref:
+            table_ref, column_name = column_ref.rsplit(".", 1)
+            columns_by_table.setdefault(table_ref, set()).add(column_name)
 
+    # Resolve before mutating: SQLGlot caches source/column information per scope.
+    tables_to_bind: list[tuple[exp.Table, str]] = []
+    columns_to_bind: list[tuple[exp.Column, str]] = []
     for scope in traverse_scope(statement):
         sources: dict[str, str | None] = {}
-        for alias, source in scope.sources.items():
+        physical_nodes: dict[str, exp.Table] = {}
+        derived_outputs: dict[str, list[str]] = {}
+        for alias, (_, source) in scope.selected_sources.items():
             if isinstance(source, exp.Table):
                 resolved = _resolve_table(source, allowed_tables, issues)
-                sources[alias.casefold()] = resolved
+                sources[alias] = resolved
+                physical_nodes[alias] = source
                 if resolved is not None:
                     referenced_tables.add(resolved)
+                    tables_to_bind.append((source, resolved))
             else:
-                sources[alias.casefold()] = None
+                sources[alias] = None
+                if isinstance(source, Scope):
+                    derived_outputs[alias] = source.outer_columns or (
+                        source.expression.named_selects
+                        if isinstance(source.expression, exp.Query)
+                        else []
+                    )
 
-        external_columns = {id(column) for column in scope.external_columns}
         for column in scope.columns:
             if column.is_star:
                 continue
             column_name = column.name
             qualifier = column.table
-            is_external = id(column) in external_columns
-            if is_external and (
-                not sources or (qualifier and qualifier.casefold() not in sources)
-            ):
-                # SQLGlot also reports unresolved local, unqualified columns as
-                # external. Only skip references that demonstrably belong to a
-                # parent scope; local unqualified columns still need validation.
+            if column.catalog:
+                _add_issue(issues, "cross_catalog_reference", "Cross-catalog column is not allowed")
                 continue
-            if qualifier:
-                key = qualifier.casefold()
-                if key not in sources:
-                    _add_issue(
-                        issues,
-                        "unknown_table_alias",
-                        f"Column {column.sql()} uses an unknown table alias",
-                    )
+            if qualifier and qualifier not in sources:
+                parent = scope.parent
+                while parent is not None and qualifier not in parent.sources:
+                    parent = parent.parent
+                if parent is not None and scope.can_be_correlated:
+                    # It is validated and bound when visiting its owning scope.
                     continue
-                qualified_table_ref = sources[key]
-                if qualified_table_ref is None:
-                    continue
-                if not _column_allowed(
-                    qualified_table_ref,
-                    column_name,
-                    columns_by_table,
-                ):
-                    _add_issue(
-                        issues,
-                        "column_not_allowed",
-                        (
-                            f"Column {qualified_table_ref}.{column_name} "
-                            "is outside the allowed context"
-                        ),
-                    )
-                    continue
-                referenced_columns.add(
-                    _canonical_column(
-                        qualified_table_ref,
-                        column_name,
-                        columns_by_table,
-                    )
+                _add_issue(
+                    issues, "unknown_table_alias",
+                    f"Column {column.sql()} uses an unknown table alias",
                 )
                 continue
+            if qualifier:
+                qualified_table_ref = sources[qualifier]
+                if column.db:
+                    node = physical_nodes.get(qualifier)
+                    if (
+                        node is None or node.alias
+                        or qualified_table_ref != f"{column.db}.{qualifier}"
+                    ):
+                        _add_issue(
+                            issues, "unknown_table_alias",
+                            f"Column {column.sql()} does not match its physical source",
+                        )
+                        continue
+                if qualified_table_ref is None:
+                    if qualifier in derived_outputs:
+                        _validate_derived_column(column, [derived_outputs[qualifier]], issues)
+                    continue
+                if not _column_allowed(qualified_table_ref, column_name, columns_by_table):
+                    _add_issue(
+                        issues, "column_not_allowed",
+                        f"Column {qualified_table_ref}.{column_name} "
+                        "is outside the allowed context",
+                    )
+                    continue
+                referenced_columns.add(f"{qualified_table_ref}.{column_name}")
+                columns_to_bind.append((column, qualifier))
+                continue
 
-            physical_sources = frozenset(
-                source for source in sources.values() if source is not None
-            )
+            physical_sources = [(alias, ref) for alias, ref in sources.items() if ref is not None]
             has_derived_source = any(source is None for source in sources.values())
             if has_derived_source and physical_sources:
                 _add_issue(
-                    issues,
-                    "ambiguous_derived_column",
+                    issues, "ambiguous_derived_column",
                     f"Unqualified column {column_name} mixes physical and derived sources",
                 )
                 continue
-            if has_derived_source and not physical_sources:
+            if has_derived_source:
+                _validate_derived_column(column, derived_outputs.values(), issues)
                 continue
-            matches = tuple(
-                table_ref
-                for table_ref in physical_sources
+            matches = [
+                (alias, table_ref) for alias, table_ref in physical_sources
                 if _column_allowed(table_ref, column_name, columns_by_table)
-            )
+            ]
             if len(matches) == 1:
-                referenced_columns.add(
-                    _canonical_column(matches[0], column_name, columns_by_table)
-                )
+                alias, table_ref = matches[0]
+                referenced_columns.add(f"{table_ref}.{column_name}")
+                columns_to_bind.append((column, alias))
             elif not matches:
                 _add_issue(
-                    issues,
-                    "column_not_allowed",
+                    issues, "column_not_allowed",
                     f"Column {column_name} is outside the allowed context",
                 )
             else:
-                candidate_refs = ", ".join(
-                    sorted(
-                        (
-                            f"{table_ref}."
-                            f"{_canonical_column_name(table_ref, column_name, columns_by_table)}"
-                        )
-                        for table_ref in matches
-                    )
-                )
+                candidates = ", ".join(sorted(f"{ref}.{column_name}" for _, ref in matches))
                 _add_issue(
-                    issues,
-                    "ambiguous_column",
-                    (
-                        f"Unqualified column {column_name} matches multiple tables; "
-                        f"candidates: {candidate_refs}"
-                    ),
+                    issues, "ambiguous_column",
+                    f"Unqualified column {column_name} matches multiple tables; "
+                    f"candidates: {candidates}",
                 )
+    for table, reference in tables_to_bind:
+        schema, name = reference.split(".")
+        table.set("db", exp.to_identifier(schema, quoted=True))
+        table.set("this", exp.to_identifier(name, quoted=True))
+    for column, alias in columns_to_bind:
+        column.set("table", exp.to_identifier(alias, quoted=True))
+        column.set("db", None)
     return referenced_tables, referenced_columns
+
+
+def _validate_derived_column(
+    column: exp.Column,
+    outputs: Iterable[list[str]],
+    issues: list[ValidationIssue],
+) -> None:
+    matches = sum(names.count(column.name) for names in outputs)
+    if matches != 1:
+        _add_issue(
+            issues, "unresolved_derived_column",
+            f"Column {column.sql()} does not resolve to one derived output",
+        )
 
 
 def _validate_parameters(
@@ -697,6 +720,29 @@ def _validate_parameters(
             parent = parent.parent
 
 
+def _validate_output_names(statement: exp.Expr, issues: list[ValidationIssue]) -> None:
+    for scope in traverse_scope(statement):
+        if not isinstance(scope.expression, exp.Select):
+            continue
+        names = [
+            projection.alias_or_name if isinstance(projection, (exp.Alias, exp.Column)) else ""
+            for projection in scope.expression.selects
+        ]
+        known = [name for name in names if name]
+        if len(known) != len(set(known)) or (
+            scope.outer_columns and len(scope.outer_columns) != len(set(scope.outer_columns))
+        ):
+            _add_issue(
+                issues, "duplicate_output_name",
+                "Output column names must be unique; provide distinct explicit aliases",
+            )
+        if len(names) > 1 and any(not name for name in names):
+            _add_issue(
+                issues, "output_alias_required",
+                "Expressions in multi-column results require explicit output aliases",
+            )
+
+
 def _resolve_output_lineage(
     statement: exp.Expr,
     allowed_tables: frozenset[str],
@@ -720,13 +766,13 @@ def _resolve_output_lineage(
             str,
             str | dict[str, tuple[frozenset[str], bool]] | None,
         ] = {}
-        for alias, source in scope.sources.items():
+        for alias, (_, source) in scope.selected_sources.items():
             if isinstance(source, exp.Table):
-                sources[alias.casefold()] = _resolve_table_silent(source, allowed_tables)
+                sources[alias] = _resolve_table_silent(source, allowed_tables)
             elif isinstance(source, Scope):
-                sources[alias.casefold()] = scope_outputs.get(id(source))
+                sources[alias] = scope_outputs.get(id(source))
             else:
-                sources[alias.casefold()] = None
+                sources[alias] = None
 
         current_columns = {id(column): column for column in scope.columns}
         output_map: dict[str, tuple[frozenset[str], bool]] = {}
@@ -734,7 +780,7 @@ def _resolve_output_lineage(
         complete = True
         for projection in scope.expression.selects:
             output_name = projection.alias_or_name
-            if not output_name or output_name.casefold() in output_map:
+            if not output_name or output_name in output_map:
                 complete = False
                 continue
             source_refs: set[str] = set()
@@ -755,7 +801,7 @@ def _resolve_output_lineage(
                 else:
                     source_refs.update(resolved)
             canonical_sources = frozenset(source_refs)
-            output_map[output_name.casefold()] = (
+            output_map[output_name] = (
                 canonical_sources,
                 projection_complete,
             )
@@ -768,6 +814,15 @@ def _resolve_output_lineage(
             complete = complete and projection_complete
         if len(output_items) != len(scope.expression.selects):
             complete = False
+        if scope.outer_columns:
+            # A CTE/derived-table column list overrides its SELECT output names.
+            if len(scope.outer_columns) == len(output_items):
+                output_map = {
+                    name: output_map[item.output_name]
+                    for name, item in zip(scope.outer_columns, output_items, strict=True)
+                }
+            else:
+                output_map = {}
         scope_outputs[id(scope)] = output_map
         if scope is scopes[-1]:
             root_output = tuple(output_items)
@@ -781,7 +836,7 @@ def _resolve_output_column(
     columns_by_table: dict[str, set[str]],
 ) -> frozenset[str] | None:
     if column.table:
-        source = sources.get(column.table.casefold())
+        source = sources.get(column.table)
         return _lineage_from_source(source, column.name, columns_by_table)
     matches = tuple(
         lineage
@@ -802,9 +857,9 @@ def _lineage_from_source(
     if isinstance(source, str):
         if not _column_allowed(source, column_name, columns_by_table):
             return None
-        return frozenset({_canonical_column(source, column_name, columns_by_table)})
+        return frozenset({f"{source}.{column_name}"})
     if isinstance(source, dict):
-        resolved = source.get(column_name.casefold())
+        resolved = source.get(column_name)
         if resolved is None or not resolved[1]:
             return None
         return resolved[0]
@@ -818,12 +873,13 @@ def _resolve_table_silent(
     if table.catalog or not table.name:
         return None
     if table.db:
-        matches = _casefold_matches(f"{table.db}.{table.name}", allowed_tables)
+        matches = _exact_matches(f"{table.db}.{table.name}", allowed_tables)
     else:
         matches = tuple(
             candidate
             for candidate in allowed_tables
-            if candidate.rsplit(".", 1)[-1].casefold() == table.name.casefold()
+            if candidate.count(".") == 1
+            if candidate.rsplit(".", 1)[-1] == table.name
         )
     return matches[0] if len(matches) == 1 else None
 
@@ -845,12 +901,13 @@ def _resolve_table(
         return None
     if table.db:
         requested = f"{table.db}.{table.name}"
-        matches = _casefold_matches(requested, allowed_tables)
+        matches = _exact_matches(requested, allowed_tables)
     else:
         matches = tuple(
             candidate
             for candidate in allowed_tables
-            if candidate.rsplit(".", 1)[-1].casefold() == table.name.casefold()
+            if candidate.count(".") == 1
+            if candidate.rsplit(".", 1)[-1] == table.name
         )
     if len(matches) == 1:
         return matches[0]
@@ -873,8 +930,10 @@ def _resolve_table(
     return None
 
 
-def _casefold_matches(value: str, candidates: frozenset[str]) -> tuple[str, ...]:
-    return tuple(candidate for candidate in candidates if candidate.casefold() == value.casefold())
+def _exact_matches(value: str, candidates: frozenset[str]) -> tuple[str, ...]:
+    return tuple(
+        candidate for candidate in candidates if candidate.count(".") == 1 and candidate == value
+    )
 
 
 def _column_allowed(
@@ -882,35 +941,7 @@ def _column_allowed(
     column_name: str,
     columns_by_table: dict[str, set[str]],
 ) -> bool:
-    return any(
-        candidate.casefold() == column_name.casefold()
-        for candidate in columns_by_table.get(table_ref, set())
-    )
-
-
-def _canonical_column(
-    table_ref: str,
-    column_name: str,
-    columns_by_table: dict[str, set[str]],
-) -> str:
-    canonical_name = next(
-        candidate
-        for candidate in columns_by_table[table_ref]
-        if candidate.casefold() == column_name.casefold()
-    )
-    return f"{table_ref}.{canonical_name}"
-
-
-def _canonical_column_name(
-    table_ref: str,
-    column_name: str,
-    columns_by_table: dict[str, set[str]],
-) -> str:
-    return next(
-        candidate
-        for candidate in columns_by_table[table_ref]
-        if candidate.casefold() == column_name.casefold()
-    )
+    return column_name in columns_by_table.get(table_ref, set())
 
 
 def _is_count_star(star: exp.Star) -> bool:

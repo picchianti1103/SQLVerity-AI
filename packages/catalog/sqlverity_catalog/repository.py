@@ -14,6 +14,13 @@ from threading import RLock
 from typing import Any, Concatenate, cast
 from uuid import UUID, uuid4
 
+from packages.domain.sqlverity_domain.budget import (
+    LLMBudgetBalance,
+    LLMBudgetReservation,
+    LLMBudgetReservationConflictError,
+    LLMBudgetUnavailableError,
+)
+from packages.domain.sqlverity_domain.contracts import ExplainResult
 from packages.domain.sqlverity_domain.epistemic import (
     ResolutionAction,
     ResolutionDecision,
@@ -76,7 +83,11 @@ from packages.domain.sqlverity_domain.models import (
     TenantRoleAssignment,
     utc_now,
 )
-from packages.domain.sqlverity_domain.query_state import QueryLifecycle
+from packages.domain.sqlverity_domain.query_state import (
+    QueryCostPolicyChangedError,
+    QueryLifecycle,
+    QueryRequestConflictError,
+)
 
 
 def _locked[**P, R](
@@ -744,11 +755,14 @@ class SQLiteCatalogRepository:
                      provider_id, model_id, llm_usage_event_id,
                      estimated_db_cost, estimated_db_rows, explained_at,
                      parameter_definitions_json, parameter_names_json,
-                     parameter_value_hash, output_lineage_json,
+                     parameter_value_hash, explain_revision, explained_sql_hash,
+                     approved_explain_revision, approved_cost_policy_revision,
+                     approved_sql_hash, approved_parameter_value_hash,
+                     output_lineage_json,
                      output_lineage_complete, approved_by, approved_at,
                      created_at, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     query_request.id,
@@ -787,6 +801,12 @@ class SQLiteCatalogRepository:
                     ),
                     json.dumps(query_request.parameter_names),
                     query_request.parameter_value_hash,
+                    query_request.explain_revision,
+                    query_request.explained_sql_hash,
+                    query_request.approved_explain_revision,
+                    query_request.approved_cost_policy_revision,
+                    query_request.approved_sql_hash,
+                    query_request.approved_parameter_value_hash,
                     json.dumps(
                         [
                             {
@@ -796,7 +816,7 @@ class SQLiteCatalogRepository:
                             for item in query_request.output_lineage
                         ]
                     ),
-                    int(query_request.output_lineage_complete),
+                    query_request.output_lineage_complete,
                     query_request.approved_by,
                     (
                         query_request.approved_at.isoformat()
@@ -845,49 +865,111 @@ class SQLiteCatalogRepository:
         target: QueryRequestState,
         *,
         actor_id: str | None = None,
+        expected_explain_revision: int | None = None,
+        expected_cost_policy_revision: int | None = None,
+        approval_sql_hash: str | None = None,
+        approval_parameter_value_hash: str | None = None,
     ) -> QueryRequest:
         current = self.get_query_request(tenant_id, request_id)
         if current is None:
             raise LookupError("Query request not found")
+        if (
+            expected_explain_revision is not None
+            and current.explain_revision != expected_explain_revision
+        ):
+            raise QueryRequestConflictError("EXPLAIN revision changed; review the current plan")
+        if (
+            target is QueryRequestState.APPROVED
+            and current.state is not QueryRequestState.READY_FOR_PREVIEW
+        ):
+            raise QueryRequestConflictError("Query request is no longer ready for approval")
         QueryLifecycle(request_id=current.id, state=current.state).transition(target)
-        approved_by: str | None
-        approved_at: datetime | None
+        approved_by = current.approved_by
+        approved_at = current.approved_at
+        approved_revision = current.approved_explain_revision
+        approved_policy_revision = current.approved_cost_policy_revision
+        approved_sql_hash = current.approved_sql_hash
+        approved_parameter_hash = current.approved_parameter_value_hash
         if target is QueryRequestState.APPROVED:
             if actor_id is None or not actor_id.strip():
                 raise ValueError("Approval requires a non-blank actor")
+            if expected_explain_revision is None or not approval_sql_hash:
+                raise ValueError("Approval requires an explicit revision and SQL digest")
+            if current.explained_at is not None and (
+                current.explained_sql_hash != approval_sql_hash
+                or current.parameter_value_hash != approval_parameter_value_hash
+            ):
+                raise QueryRequestConflictError("SQL or bindings differ from the EXPLAIN revision")
             approved_by = actor_id.strip()
             approved_at = utc_now()
-        elif actor_id is not None:
-            raise ValueError("An actor can only be supplied for approval")
-        else:
-            approved_by = current.approved_by
-            approved_at = current.approved_at
+            if expected_cost_policy_revision is None:
+                raise ValueError("Approval requires the execution cost policy revision")
+            approved_policy_revision = expected_cost_policy_revision
+            approved_revision = current.explain_revision
+            approved_sql_hash = approval_sql_hash
+            approved_parameter_hash = approval_parameter_value_hash
+        elif actor_id is not None or approval_sql_hash is not None:
+            raise ValueError("Approval metadata can only be supplied for approval")
+        if target is QueryRequestState.READY_FOR_PREVIEW:
+            approved_by = approved_at = approved_revision = approved_policy_revision = None
+            approved_sql_hash = approved_parameter_hash = None
         updated_at = utc_now()
         transition_details: dict[str, object] = {
             "from_state": current.state.value,
             "to_state": target.value,
         }
         if target is QueryRequestState.APPROVED:
-            transition_details["actor_id"] = approved_by
+            transition_details.update(
+                actor_id=approved_by,
+                explain_revision=approved_revision,
+                sql_hash=approved_sql_hash,
+                cost_policy_revision=approved_policy_revision,
+            )
         with self._connection:
+            if target in {QueryRequestState.APPROVED, QueryRequestState.EXECUTING} or (
+                target is QueryRequestState.READY_FOR_PREVIEW
+                and current.state is QueryRequestState.APPROVED
+            ):
+                self._lock_execution_cost_policy(tenant_id, current.data_source_id)
+                policy = self.get_execution_cost_policy(tenant_id, current.data_source_id)
+                revision = policy.revision if policy is not None else 0
+                if target is QueryRequestState.READY_FOR_PREVIEW:
+                    if current.state is not QueryRequestState.APPROVED or (
+                        current.approved_cost_policy_revision == revision
+                    ):
+                        raise QueryRequestConflictError("Only a stale approval can be reopened")
+                elif expected_cost_policy_revision != revision or (
+                    target is QueryRequestState.EXECUTING
+                    and current.approved_cost_policy_revision != revision
+                ):
+                    raise QueryCostPolicyChangedError(
+                        "Execution cost policy changed; review and approve again"
+                    )
             cursor = self._connection.execute(
                 """
                 UPDATE query_requests
-                SET state = ?, approved_by = ?, approved_at = ?, updated_at = ?
-                WHERE tenant_id = ? AND id = ? AND state = ?
+                SET state = ?, approved_by = ?, approved_at = ?, updated_at = ?,
+                    approved_explain_revision = ?, approved_sql_hash = ?,
+                    approved_parameter_value_hash = ?, approved_cost_policy_revision = ?
+                WHERE tenant_id = ? AND id = ? AND state = ? AND explain_revision = ?
                 """,
                 (
                     target.value,
                     approved_by,
                     approved_at.isoformat() if approved_at is not None else None,
                     updated_at.isoformat(),
+                    approved_revision,
+                    approved_sql_hash,
+                    approved_parameter_hash,
+                    approved_policy_revision,
                     tenant_id,
                     request_id,
                     current.state.value,
+                    current.explain_revision,
                 ),
             )
             if cursor.rowcount != 1:
-                raise RuntimeError("Query request state changed concurrently")
+                raise QueryRequestConflictError("Query request changed concurrently")
             self._append_audit(
                 AuditEvent(
                     tenant_id=tenant_id,
@@ -903,6 +985,78 @@ class SQLiteCatalogRepository:
             approved_by=approved_by,
             approved_at=approved_at,
             updated_at=updated_at,
+            approved_explain_revision=approved_revision,
+            approved_sql_hash=approved_sql_hash,
+            approved_parameter_value_hash=approved_parameter_hash,
+            approved_cost_policy_revision=approved_policy_revision,
+        )
+
+    @_locked
+    def record_query_explain(
+        self,
+        tenant_id: str,
+        request_id: str,
+        *,
+        expected_revision: int,
+        sql_hash: str,
+        parameter_value_hash: str | None,
+        parameter_names: tuple[str, ...],
+        result: ExplainResult,
+    ) -> QueryRequest:
+        current = self.get_query_request(tenant_id, request_id)
+        if current is None:
+            raise LookupError("Query request not found")
+        revision = expected_revision + 1
+        explained_at = utc_now()
+        with self._connection:
+            cursor = self._connection.execute(
+                """
+                UPDATE query_requests
+                SET estimated_db_cost = ?, estimated_db_rows = ?, explained_at = ?,
+                    parameter_names_json = ?, parameter_value_hash = ?,
+                    explain_revision = ?, explained_sql_hash = ?, updated_at = ?
+                WHERE tenant_id = ? AND id = ? AND state = ? AND explain_revision = ?
+                """,
+                (
+                    result.estimated_total_cost, result.estimated_rows, explained_at.isoformat(),
+                    json.dumps(parameter_names), parameter_value_hash, revision, sql_hash,
+                    explained_at.isoformat(), tenant_id, request_id,
+                    QueryRequestState.READY_FOR_PREVIEW.value, expected_revision,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise QueryRequestConflictError("EXPLAIN is stale; query state or revision changed")
+            self._connection.execute(
+                """
+                INSERT INTO query_explain_revisions
+                    (tenant_id, request_id, revision, sql_hash, parameter_value_hash,
+                     parameter_names_json, estimated_db_cost, estimated_db_rows,
+                     elapsed_ms, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    tenant_id, request_id, revision, sql_hash, parameter_value_hash,
+                    json.dumps(parameter_names), result.estimated_total_cost, result.estimated_rows,
+                    result.elapsed_ms, explained_at.isoformat(),
+                ),
+            )
+            self._append_audit(
+                AuditEvent(
+                    tenant_id=tenant_id, event_type="query.explained",
+                    subject_type="query_request", subject_id=request_id,
+                    details={
+                        "revision": revision, "sql_hash": sql_hash,
+                        "estimated_total_cost": result.estimated_total_cost,
+                        "estimated_rows": result.estimated_rows,
+                        "elapsed_ms": result.elapsed_ms, "parameter_names": parameter_names,
+                    },
+                )
+            )
+        return replace(
+            current, explain_revision=revision, explained_sql_hash=sql_hash,
+            estimated_db_cost=result.estimated_total_cost, estimated_db_rows=result.estimated_rows,
+            explained_at=explained_at, updated_at=explained_at,
+            parameter_names=parameter_names, parameter_value_hash=parameter_value_hash,
         )
 
     @_locked
@@ -913,48 +1067,15 @@ class SQLiteCatalogRepository:
         event_type: str,
         details: Mapping[str, object],
     ) -> None:
-        if event_type not in {"query.explained", "query.result_metadata"}:
+        if event_type != "query.result_metadata":
             raise ValueError("Unsupported query activity event")
         if self.get_query_request(tenant_id, request_id) is None:
             raise LookupError("Query request not found")
         with self._connection:
-            if event_type == "query.explained":
-                estimated_cost = details.get("estimated_total_cost")
-                estimated_rows = details.get("estimated_rows")
-                parameter_names = details.get("parameter_names", ())
-                parameter_value_hash = details.get("parameter_value_hash")
-                explained_at = utc_now()
-                self._connection.execute(
-                    """
-                    UPDATE query_requests
-                    SET estimated_db_cost = ?, estimated_db_rows = ?, explained_at = ?,
-                        parameter_names_json = ?, parameter_value_hash = ?
-                    WHERE tenant_id = ? AND id = ?
-                    """,
-                    (
-                        estimated_cost,
-                        estimated_rows,
-                        explained_at.isoformat(),
-                        json.dumps(parameter_names),
-                        parameter_value_hash,
-                        tenant_id,
-                        request_id,
-                    ),
-                )
-                audit_details = {
-                    key: value
-                    for key, value in details.items()
-                    if key != "parameter_value_hash"
-                }
-            else:
-                audit_details = dict(details)
             self._append_audit(
                 AuditEvent(
-                    tenant_id=tenant_id,
-                    event_type=event_type,
-                    subject_type="query_request",
-                    subject_id=request_id,
-                    details=audit_details,
+                    tenant_id=tenant_id, event_type=event_type,
+                    subject_type="query_request", subject_id=request_id, details=dict(details),
                 )
             )
 
@@ -2239,50 +2360,322 @@ class SQLiteCatalogRepository:
     def record_llm_usage(self, event: LLMUsageEvent) -> None:
         self._require_tenant(event.tenant_id)
         with self._connection:
+            if event.currency is not None:
+                self._lock_llm_budget(event.tenant_id, event.currency)
+            self._insert_llm_usage(event)
+
+    def _lock_llm_budget(self, tenant_id: str, currency: str) -> None:
+        # DML acquires a SQLite write lock / PostgreSQL row lock for the transaction.
+        self._connection.execute(
+            "INSERT INTO llm_budget_accounts (tenant_id, currency, revision) VALUES (?, ?, 0) "
+            "ON CONFLICT (tenant_id, currency) DO NOTHING",
+            (tenant_id, currency),
+        )
+        self._connection.execute(
+            "UPDATE llm_budget_accounts SET revision = revision + 1 "
+            "WHERE tenant_id = ? AND currency = ?",
+            (tenant_id, currency),
+        )
+
+    @_locked
+    def llm_budget_balance(
+        self,
+        tenant_id: str,
+        currency: str,
+        period_start: datetime,
+        period_end: datetime,
+    ) -> LLMBudgetBalance:
+        rows = self._connection.execute(
+            """
+            SELECT actual_cost, estimated_cost AS amount, 'usage' AS state
+            FROM llm_usage_events
+            WHERE tenant_id = ? AND currency = ? AND created_at >= ? AND created_at < ?
+            UNION ALL
+            SELECT actual_cost, amount, state FROM llm_budget_reservations
+            WHERE tenant_id = ? AND currency = ? AND period_start = ?
+              AND (state IN ('reserved', 'in_flight', 'uncertain')
+                   OR (state = 'settled' AND usage_event_id IS NULL))
+            """,
+            (
+                tenant_id,
+                currency,
+                _utc_iso(period_start),
+                _utc_iso(period_end),
+                tenant_id,
+                currency,
+                _utc_iso(period_start),
+            ),
+        ).fetchall()
+        spent = reserved = uncertain = reconciled = Decimal("0")
+        for row in rows:
+            amount = Decimal(row["actual_cost"] or row["amount"] or "0")
+            if row["state"] in {"reserved", "in_flight", "uncertain"}:
+                reserved += amount
+                if row["state"] == "uncertain":
+                    uncertain += amount
+            else:
+                spent += amount
+                if row["state"] == "settled":
+                    reconciled += amount
+        return LLMBudgetBalance(spent, reserved, uncertain, reconciled)
+
+    @_locked
+    def reserve_llm_budget(self, reservation: LLMBudgetReservation) -> LLMBudgetReservation:
+        if reservation.state != "reserved" or reservation.actual_cost is not None:
+            raise ValueError("Only a new reservation may be admitted")
+        if not reservation.amount.is_finite() or reservation.amount < 0:
+            raise ValueError("Reservation must have a finite nonnegative amount")
+        self._require_tenant(reservation.tenant_id)
+        with self._connection:
+            self._lock_llm_budget(reservation.tenant_id, reservation.currency)
+            budget = self.get_effective_tenant_budget(
+                reservation.tenant_id,
+                reservation.currency,
+                reservation.created_at,
+            )
+            balance = self.llm_budget_balance(
+                reservation.tenant_id,
+                reservation.currency,
+                reservation.period_start,
+                reservation.period_end,
+            )
+            if (
+                budget is not None
+                and balance.spent + balance.reserved + reservation.amount > budget.amount
+            ):
+                raise LLMBudgetUnavailableError(
+                    "Monthly cost including reservations exceeds budget"
+                )
             self._connection.execute(
                 """
-                INSERT INTO llm_usage_events
-                    (id, tenant_id, provider_id, model_id, purpose,
-                     estimated_input_tokens, estimated_output_tokens,
-                     input_tokens, cached_input_tokens, output_tokens, latency_ms,
-                     estimated_cost, actual_cost, currency, pricing_id, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO llm_budget_reservations
+                    (id, tenant_id, provider_id, model_id, pricing_id, currency, amount,
+                     period_start, period_end, state, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'reserved', ?, ?)
                 """,
                 (
-                    event.id,
-                    event.tenant_id,
-                    event.provider_id,
-                    event.model_id,
-                    event.purpose,
-                    event.estimated_input_tokens,
-                    event.estimated_output_tokens,
-                    event.input_tokens,
-                    event.cached_input_tokens,
-                    event.output_tokens,
-                    event.latency_ms,
-                    event.estimated_cost,
-                    event.actual_cost,
-                    event.currency,
-                    event.pricing_id,
-                    event.created_at.isoformat(),
+                    reservation.id,
+                    reservation.tenant_id,
+                    reservation.provider_id,
+                    reservation.model_id,
+                    reservation.pricing_id,
+                    reservation.currency,
+                    str(reservation.amount),
+                    _utc_iso(reservation.period_start),
+                    _utc_iso(reservation.period_end),
+                    _utc_iso(reservation.created_at),
+                    _utc_iso(reservation.updated_at),
                 ),
             )
+        return reservation
+
+    @_locked
+    def get_llm_budget_reservation(
+        self,
+        tenant_id: str,
+        reservation_id: str,
+    ) -> LLMBudgetReservation | None:
+        row = self._connection.execute(
+            "SELECT * FROM llm_budget_reservations WHERE tenant_id = ? AND id = ?",
+            (tenant_id, reservation_id),
+        ).fetchone()
+        return _llm_reservation_from_row(row) if row is not None else None
+
+    @_locked
+    def list_llm_budget_reservations(self, tenant_id: str) -> tuple[LLMBudgetReservation, ...]:
+        rows = self._connection.execute(
+            "SELECT * FROM llm_budget_reservations WHERE tenant_id = ? "
+            "ORDER BY created_at DESC, id DESC LIMIT 1000",
+            (tenant_id,),
+        ).fetchall()
+        return tuple(_llm_reservation_from_row(row) for row in rows)
+
+    @_locked
+    def start_llm_budget_reservation(self, tenant_id: str, reservation_id: str) -> None:
+        with self._connection:
+            cursor = self._connection.execute(
+                "UPDATE llm_budget_reservations SET state = 'in_flight', updated_at = ? "
+                "WHERE tenant_id = ? AND id = ? AND state = 'reserved'",
+                (_utc_iso(utc_now()), tenant_id, reservation_id),
+            )
+            if cursor.rowcount != 1:
+                raise LLMBudgetReservationConflictError("Reservation is no longer available")
+
+    @_locked
+    def mark_llm_budget_uncertain(self, tenant_id: str, reservation_id: str) -> None:
+        with self._connection:
+            self._connection.execute(
+                "UPDATE llm_budget_reservations SET state = 'uncertain', updated_at = ? "
+                "WHERE tenant_id = ? AND id = ? AND state IN ('reserved', 'in_flight')",
+                (_utc_iso(utc_now()), tenant_id, reservation_id),
+            )
+
+    @_locked
+    def release_undispatched_llm_budget(self, tenant_id: str, reservation_id: str) -> None:
+        """Caller guarantees provider I/O has not started; never use for a timeout."""
+        reservation = self.get_llm_budget_reservation(tenant_id, reservation_id)
+        if reservation is None:
+            raise LookupError("Budget reservation not found")
+        with self._connection:
+            self._lock_llm_budget(tenant_id, reservation.currency)
+            self._connection.execute(
+                "UPDATE llm_budget_reservations SET state = 'released', actual_cost = '0', "
+                "updated_at = ? WHERE tenant_id = ? AND id = ? "
+                "AND state IN ('reserved', 'in_flight')",
+                (_utc_iso(utc_now()), tenant_id, reservation_id),
+            )
+
+    @_locked
+    def settle_llm_budget_reservation(
+        self,
+        tenant_id: str,
+        reservation_id: str,
+        usage: LLMUsageEvent,
+    ) -> None:
+        reservation = self.get_llm_budget_reservation(tenant_id, reservation_id)
+        if reservation is None:
+            raise LookupError("Budget reservation not found")
+        if (
+            usage.tenant_id,
+            usage.provider_id,
+            usage.model_id,
+            usage.currency,
+            usage.pricing_id,
+        ) != (
+            tenant_id,
+            reservation.provider_id,
+            reservation.model_id,
+            reservation.currency,
+            reservation.pricing_id,
+        ) or usage.created_at != reservation.created_at:
+            raise ValueError(
+                "Usage does not match the reserved model, pricing, or accounting period"
+            )
+        if usage.actual_cost is None or not Decimal(usage.actual_cost).is_finite():
+            raise ValueError("Settlement requires a finite actual cost")
+        if Decimal(usage.actual_cost) < 0:
+            raise ValueError("Actual cost must not be negative")
+        with self._connection:
+            self._lock_llm_budget(tenant_id, reservation.currency)
+            cursor = self._connection.execute(
+                "UPDATE llm_budget_reservations SET state = 'settled', actual_cost = ?, "
+                "usage_event_id = ?, updated_at = ? WHERE tenant_id = ? AND id = ? "
+                "AND state IN ('in_flight', 'uncertain')",
+                (usage.actual_cost, usage.id, _utc_iso(utc_now()), tenant_id, reservation_id),
+            )
+            if cursor.rowcount != 1:
+                current = self.get_llm_budget_reservation(tenant_id, reservation_id)
+                if current is not None and current.usage_event_id == usage.id:
+                    return
+                raise LLMBudgetReservationConflictError("Reservation was already reconciled")
+            self._insert_llm_usage(usage)
+
+    @_locked
+    def reconcile_llm_budget_reservation(
+        self,
+        tenant_id: str,
+        reservation_id: str,
+        *,
+        actual_cost: Decimal,
+        actor_id: str,
+        reason: str,
+    ) -> LLMBudgetReservation:
+        if (
+            not actual_cost.is_finite()
+            or actual_cost < 0
+            or not actor_id.strip()
+            or not reason.strip()
+        ):
+            raise ValueError("Reconciliation requires a finite cost, actor, and evidence reason")
+        reservation = self.get_llm_budget_reservation(tenant_id, reservation_id)
+        if reservation is None:
+            raise LookupError("Budget reservation not found")
+        now = utc_now()
+        with self._connection:
+            self._lock_llm_budget(tenant_id, reservation.currency)
+            cursor = self._connection.execute(
+                "UPDATE llm_budget_reservations SET state = ?, actual_cost = ?, updated_at = ? "
+                "WHERE tenant_id = ? AND id = ? AND (state = 'uncertain' OR "
+                "(state IN ('reserved', 'in_flight') AND updated_at < ?))",
+                (
+                    "released" if actual_cost == 0 else "settled",
+                    str(actual_cost),
+                    _utc_iso(now),
+                    tenant_id,
+                    reservation_id,
+                    _utc_iso(now - timedelta(hours=1)),
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise LLMBudgetReservationConflictError(
+                    "Only uncertain or abandoned (over one hour) reservations can be reconciled"
+                )
             self._append_audit(
                 AuditEvent(
-                    tenant_id=event.tenant_id,
-                    event_type="llm.usage_recorded",
-                    subject_type="llm_usage_event",
-                    subject_id=event.id,
+                    tenant_id=tenant_id,
+                    event_type="finops.reservation_reconciled",
+                    subject_type="llm_budget_reservation",
+                    subject_id=reservation_id,
                     details={
-                        "provider_id": event.provider_id,
-                        "model_id": event.model_id,
-                        "purpose": event.purpose,
-                        "input_tokens": event.input_tokens,
-                        "output_tokens": event.output_tokens,
-                        "latency_ms": event.latency_ms,
+                        "actor_id": actor_id,
+                        "reason": reason,
+                        "actual_cost": str(actual_cost),
+                        "currency": reservation.currency,
                     },
                 )
             )
+        return replace(
+            reservation,
+            state="released" if actual_cost == 0 else "settled",
+            actual_cost=actual_cost,
+            updated_at=now,
+        )
+
+    def _insert_llm_usage(self, event: LLMUsageEvent) -> None:
+        self._connection.execute(
+            """
+            INSERT INTO llm_usage_events
+                (id, tenant_id, provider_id, model_id, purpose,
+                 estimated_input_tokens, estimated_output_tokens,
+                 input_tokens, cached_input_tokens, output_tokens, latency_ms,
+                 estimated_cost, actual_cost, currency, pricing_id, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                event.id,
+                event.tenant_id,
+                event.provider_id,
+                event.model_id,
+                event.purpose,
+                event.estimated_input_tokens,
+                event.estimated_output_tokens,
+                event.input_tokens,
+                event.cached_input_tokens,
+                event.output_tokens,
+                event.latency_ms,
+                event.estimated_cost,
+                event.actual_cost,
+                event.currency,
+                event.pricing_id,
+                event.created_at.isoformat(),
+            ),
+        )
+        self._append_audit(
+            AuditEvent(
+                tenant_id=event.tenant_id,
+                event_type="llm.usage_recorded",
+                subject_type="llm_usage_event",
+                subject_id=event.id,
+                details={
+                    "provider_id": event.provider_id,
+                    "model_id": event.model_id,
+                    "purpose": event.purpose,
+                    "input_tokens": event.input_tokens,
+                    "output_tokens": event.output_tokens,
+                    "latency_ms": event.latency_ms,
+                },
+            )
+        )
 
     @_locked
     def list_llm_usage_events(self, tenant_id: str) -> tuple[LLMUsageEvent, ...]:
@@ -2603,29 +2996,30 @@ class SQLiteCatalogRepository:
     @_locked
     def create_tenant_budget(self, budget: TenantBudget) -> TenantBudget:
         self._require_tenant(budget.tenant_id)
-        overlap = self._connection.execute(
-            """
-            SELECT 1 FROM tenant_budgets
-            WHERE tenant_id = ? AND currency = ? AND period = ?
-              AND valid_from < ?
-              AND (valid_to IS NULL OR valid_to > ?)
-            LIMIT 1
-            """,
-            (
-                budget.tenant_id,
-                budget.currency,
-                budget.period.value,
-                (
-                    _utc_iso(budget.valid_to)
-                    if budget.valid_to is not None
-                    else "9999-12-31T23:59:59+00:00"
-                ),
-                _utc_iso(budget.valid_from),
-            ),
-        ).fetchone()
-        if overlap is not None:
-            raise ValueError("Tenant budget validity intervals must not overlap")
         with self._connection:
+            self._lock_llm_budget(budget.tenant_id, budget.currency)
+            overlap = self._connection.execute(
+                """
+                SELECT 1 FROM tenant_budgets
+                WHERE tenant_id = ? AND currency = ? AND period = ?
+                  AND valid_from < ?
+                  AND (valid_to IS NULL OR valid_to > ?)
+                LIMIT 1
+                """,
+                (
+                    budget.tenant_id,
+                    budget.currency,
+                    budget.period.value,
+                    (
+                        _utc_iso(budget.valid_to)
+                        if budget.valid_to is not None
+                        else "9999-12-31T23:59:59+00:00"
+                    ),
+                    _utc_iso(budget.valid_from),
+                ),
+            ).fetchone()
+            if overlap is not None:
+                raise ValueError("Tenant budget validity intervals must not overlap")
             self._connection.execute(
                 """
                 INSERT INTO tenant_budgets
@@ -2698,26 +3092,26 @@ class SQLiteCatalogRepository:
     ) -> ExecutionCostPolicy:
         if self.get_data_source(policy.tenant_id, policy.data_source_id) is None:
             raise LookupError("DataSource does not exist in this tenant")
-        row = self._connection.execute(
-            """
-            SELECT id FROM execution_cost_policies
-            WHERE tenant_id = ? AND data_source_id = ?
-            """,
-            (policy.tenant_id, policy.data_source_id),
-        ).fetchone()
-        stored = replace(policy, id=row["id"]) if row is not None else policy
         with self._connection:
+            self._lock_execution_cost_policy(policy.tenant_id, policy.data_source_id)
+            current = self.get_execution_cost_policy(policy.tenant_id, policy.data_source_id)
+            stored = replace(
+                policy,
+                id=current.id if current else policy.id,
+                revision=current.revision + 1 if current else 1,
+                updated_at=utc_now(),
+            )
             self._connection.execute(
                 """
                 INSERT INTO execution_cost_policies
                     (id, tenant_id, data_source_id, max_total_cost,
-                     max_estimated_rows, require_explain, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                     max_estimated_rows, require_explain, updated_at, revision)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (tenant_id, data_source_id) DO UPDATE SET
                     max_total_cost = excluded.max_total_cost,
                     max_estimated_rows = excluded.max_estimated_rows,
                     require_explain = excluded.require_explain,
-                    updated_at = excluded.updated_at
+                    updated_at = excluded.updated_at, revision = excluded.revision
                 """,
                 (
                     stored.id,
@@ -2727,6 +3121,7 @@ class SQLiteCatalogRepository:
                     stored.max_estimated_rows,
                     stored.require_explain,
                     stored.updated_at.isoformat(),
+                    stored.revision,
                 ),
             )
             self._append_audit(
@@ -2739,10 +3134,18 @@ class SQLiteCatalogRepository:
                         "max_total_cost": stored.max_total_cost,
                         "max_estimated_rows": stored.max_estimated_rows,
                         "require_explain": stored.require_explain,
+                        "revision": stored.revision,
                     },
                 )
             )
         return stored
+
+    def _lock_execution_cost_policy(self, tenant_id: str, data_source_id: str) -> None:
+        # Lock the source even when no cost policy exists yet.
+        self._connection.execute(
+            "UPDATE data_sources SET name = name WHERE tenant_id = ? AND id = ?",
+            (tenant_id, data_source_id),
+        )
 
     @_locked
     def get_execution_cost_policy(
@@ -2893,81 +3296,108 @@ class SQLiteCatalogRepository:
         max_requests: int,
         max_concurrent: int,
         updated_at: datetime,
+        lease_id: str,
+        expires_at: datetime,
     ) -> tuple[bool, str | None]:
-        if not scope_key or window_number < 0 or max_requests < 1 or max_concurrent < 1:
+        if (
+            not scope_key
+            or not lease_id
+            or window_number < 0
+            or max_requests < 1
+            or max_concurrent < 1
+        ):
             raise ValueError("Invalid request quota acquisition")
+        if expires_at <= updated_at:
+            raise ValueError("Request lease expiry must follow acquisition")
         with self._connection:
             self._connection.execute(
-                """
-                INSERT INTO request_quota_windows
-                    (scope_key, window_number, request_count, active_requests, updated_at)
-                VALUES (?, ?, 0, 0, ?)
-                ON CONFLICT (scope_key) DO NOTHING
-                """,
-                (scope_key, window_number, updated_at.isoformat()),
+                "INSERT INTO request_quota_windows "
+                "(scope_key, window_number, request_count, active_requests, updated_at) "
+                "VALUES (?, ?, 0, 0, ?) ON CONFLICT (scope_key) DO NOTHING",
+                (scope_key, window_number, _utc_iso(updated_at)),
             )
+            # Lock the scope before counting leases. All writers take this lock first.
+            self._connection.execute(
+                "UPDATE request_quota_windows SET updated_at = ? WHERE scope_key = ?",
+                (_utc_iso(updated_at), scope_key),
+            )
+            self._connection.execute(
+                "DELETE FROM request_concurrency_leases WHERE scope_key = ? AND expires_at <= ?",
+                (scope_key, _utc_iso(updated_at)),
+            )
+            active = self._connection.execute(
+                "SELECT COUNT(*) AS lease_count FROM request_concurrency_leases "
+                "WHERE scope_key = ?",
+                (scope_key,),
+            ).fetchone()
+            if active is not None and int(active["lease_count"]) >= max_concurrent:
+                return False, "concurrency"
             cursor = self._connection.execute(
-                """
-                UPDATE request_quota_windows
-                SET window_number = ?,
-                    request_count = CASE
-                        WHEN window_number = ? THEN request_count + 1
-                        ELSE 1
-                    END,
-                    active_requests = CASE
-                        WHEN window_number = ? THEN active_requests + 1
-                        ELSE 1
-                    END,
-                    updated_at = ?
-                WHERE scope_key = ?
-                  AND (window_number <> ? OR active_requests < ?)
-                  AND (window_number <> ? OR request_count < ?)
-                """,
+                "UPDATE request_quota_windows SET window_number = ?, request_count = "
+                "CASE WHEN window_number = ? THEN request_count + 1 ELSE 1 END "
+                "WHERE scope_key = ? AND (window_number < ? OR "
+                "(window_number = ? AND request_count < ?))",
                 (
                     window_number,
                     window_number,
-                    window_number,
-                    updated_at.isoformat(),
                     scope_key,
                     window_number,
-                    max_concurrent,
                     window_number,
                     max_requests,
                 ),
             )
-            if cursor.rowcount == 1:
-                return True, None
-            row = self._connection.execute(
-                """
-                SELECT window_number, request_count, active_requests
-                FROM request_quota_windows WHERE scope_key = ?
-                """,
-                (scope_key,),
-            ).fetchone()
-            if row is not None and int(row["active_requests"]) >= max_concurrent:
-                return False, "concurrency"
-            return False, "rate"
+            if cursor.rowcount != 1:
+                return False, "rate"
+            self._connection.execute(
+                "INSERT INTO request_concurrency_leases (scope_key, lease_id, expires_at) "
+                "VALUES (?, ?, ?)",
+                (scope_key, lease_id, _utc_iso(expires_at)),
+            )
+        return True, None
 
     @_locked
-    def release_request_quota(
-        self,
-        scope_key: str,
-        window_number: int,
-        updated_at: datetime,
-    ) -> None:
+    def release_request_quota(self, scope_key: str, lease_id: str, updated_at: datetime) -> None:
         with self._connection:
             self._connection.execute(
-                """
-                UPDATE request_quota_windows
-                SET active_requests = CASE
-                        WHEN active_requests > 0 THEN active_requests - 1
-                        ELSE 0
-                    END,
-                    updated_at = ?
-                WHERE scope_key = ? AND window_number = ?
-                """,
-                (updated_at.isoformat(), scope_key, window_number),
+                "UPDATE request_quota_windows SET updated_at = ? WHERE scope_key = ?",
+                (_utc_iso(updated_at), scope_key),
             )
+            self._connection.execute(
+                "DELETE FROM request_concurrency_leases WHERE scope_key = ? AND lease_id = ?",
+                (scope_key, lease_id),
+            )
+
+    @_locked
+    def renew_request_quota(
+        self,
+        scope_keys: tuple[str, ...],
+        lease_id: str,
+        now: datetime,
+        expires_at: datetime,
+    ) -> bool:
+        if expires_at <= now:
+            raise ValueError("Request lease expiry must follow renewal")
+        with self._connection:
+            for scope_key in scope_keys:
+                self._connection.execute(
+                    "UPDATE request_quota_windows SET updated_at = ? WHERE scope_key = ?",
+                    (_utc_iso(now), scope_key),
+                )
+            for scope_key in scope_keys:
+                row = self._connection.execute(
+                    "SELECT 1 FROM request_concurrency_leases "
+                    "WHERE scope_key = ? AND lease_id = ? AND expires_at > ?",
+                    (scope_key, lease_id, _utc_iso(now)),
+                ).fetchone()
+                if row is None:
+                    return False
+            for scope_key in scope_keys:
+                self._connection.execute(
+                    "UPDATE request_concurrency_leases SET expires_at = ? "
+                    "WHERE scope_key = ? AND lease_id = ?",
+                    (_utc_iso(expires_at), scope_key, lease_id),
+                )
+        return True
 
     @_locked
     def enqueue_background_job(self, job: BackgroundJob) -> BackgroundJob:
@@ -3021,7 +3451,7 @@ class SQLiteCatalogRepository:
                 """
                 SELECT * FROM background_jobs
                 WHERE tenant_id = ? AND job_type = ?
-                  AND ((data_source_id = ?) OR (data_source_id IS NULL AND ? IS NULL))
+                  AND ((data_source_id = ?) OR (data_source_id IS NULL AND CAST(? AS TEXT) IS NULL))
                   AND status IN ('queued', 'running')
                 ORDER BY created_at, id LIMIT 1
                 """,
@@ -3277,7 +3707,7 @@ class SQLiteCatalogRepository:
         rows = self._connection.execute(
             """
             SELECT * FROM background_jobs
-            WHERE tenant_id = ? AND (? IS NULL OR data_source_id = ?)
+            WHERE tenant_id = ? AND (CAST(? AS TEXT) IS NULL OR data_source_id = ?)
             ORDER BY created_at DESC, id DESC LIMIT ?
             """,
             (tenant_id, data_source_id, data_source_id, limit),
@@ -3301,8 +3731,10 @@ class SQLiteCatalogRepository:
             """
             SELECT COUNT(*) AS item_count FROM request_quota_windows
             WHERE active_requests = 0 AND updated_at < ?
+              AND NOT EXISTS (SELECT 1 FROM request_concurrency_leases AS lease
+                  WHERE lease.scope_key = request_quota_windows.scope_key AND lease.expires_at > ?)
             """,
-            (cutoff.isoformat(),),
+            (cutoff.isoformat(), cutoff.isoformat()),
         ).fetchone()
         return OperationalRetentionReport(
             cutoff=cutoff,
@@ -3335,8 +3767,10 @@ class SQLiteCatalogRepository:
                 """
                 DELETE FROM request_quota_windows
                 WHERE active_requests = 0 AND updated_at < ?
+              AND NOT EXISTS (SELECT 1 FROM request_concurrency_leases AS lease
+                  WHERE lease.scope_key = request_quota_windows.scope_key AND lease.expires_at > ?)
                 """,
-                (cutoff.isoformat(),),
+                (cutoff.isoformat(), cutoff.isoformat()),
             )
             self._connection.execute(
                 """
@@ -3650,7 +4084,7 @@ class SQLiteCatalogRepository:
         row = self._connection.execute(
             """
             SELECT 1 FROM catalog_versions
-            WHERE tenant_id = ? AND id = ? AND (? IS NULL OR data_source_id = ?)
+            WHERE tenant_id = ? AND id = ? AND (CAST(? AS TEXT) IS NULL OR data_source_id = ?)
             """,
             (tenant_id, catalog_version_id, data_source_id, data_source_id),
         ).fetchone()
@@ -3698,6 +4132,7 @@ class SQLiteCatalogRepository:
                 "actor_id": "TEXT",
                 "reason": "TEXT",
             },
+            "execution_cost_policies": {"revision": "INTEGER NOT NULL DEFAULT 1"},
             "llm_usage_events": {
                 "cached_input_tokens": "INTEGER NOT NULL DEFAULT 0",
                 "currency": "TEXT",
@@ -3716,6 +4151,12 @@ class SQLiteCatalogRepository:
                 "explained_at": "TEXT",
                 "parameter_names_json": "TEXT NOT NULL DEFAULT '[]'",
                 "parameter_value_hash": "TEXT",
+                "explain_revision": "INTEGER NOT NULL DEFAULT 0",
+                "explained_sql_hash": "TEXT",
+                "approved_explain_revision": "INTEGER",
+                "approved_cost_policy_revision": "INTEGER",
+                "approved_sql_hash": "TEXT",
+                "approved_parameter_value_hash": "TEXT",
                 "parameter_definitions_json": "TEXT NOT NULL DEFAULT '[]'",
                 "output_lineage_json": "TEXT NOT NULL DEFAULT '[]'",
                 "output_lineage_complete": "INTEGER NOT NULL DEFAULT 0",
@@ -3907,6 +4348,12 @@ def _query_request_from_row(row: sqlite3.Row) -> QueryRequest:
         ),
         parameter_names=tuple(json.loads(row["parameter_names_json"])),
         parameter_value_hash=row["parameter_value_hash"],
+        explain_revision=int(row["explain_revision"]),
+        explained_sql_hash=row["explained_sql_hash"],
+        approved_explain_revision=row["approved_explain_revision"],
+        approved_cost_policy_revision=row["approved_cost_policy_revision"],
+        approved_sql_hash=row["approved_sql_hash"],
+        approved_parameter_value_hash=row["approved_parameter_value_hash"],
         parameter_definitions=tuple(
             QueryParameterDefinition(
                 name=item["name"],
@@ -4758,6 +5205,7 @@ def _execution_cost_policy_from_row(row: sqlite3.Row) -> ExecutionCostPolicy:
             else None
         ),
         require_explain=bool(row["require_explain"]),
+        revision=int(row["revision"]),
         updated_at=_parse_datetime(row["updated_at"]),
     )
 
@@ -4810,4 +5258,16 @@ def _authorized_query_definition_from_row(
         allow_filtering=bool(row["allow_filtering"]),
         allow_aggregation=bool(row["allow_aggregation"]),
         created_at=_parse_datetime(row["created_at"]),
+    )
+
+
+def _llm_reservation_from_row(row: sqlite3.Row) -> LLMBudgetReservation:
+    return LLMBudgetReservation(
+        id=row["id"], tenant_id=row["tenant_id"], provider_id=row["provider_id"],
+        model_id=row["model_id"], pricing_id=row["pricing_id"], currency=row["currency"],
+        amount=Decimal(row["amount"]), period_start=_parse_datetime(row["period_start"]),
+        period_end=_parse_datetime(row["period_end"]), state=row["state"],
+        actual_cost=Decimal(row["actual_cost"]) if row["actual_cost"] is not None else None,
+        usage_event_id=row["usage_event_id"], created_at=_parse_datetime(row["created_at"]),
+        updated_at=_parse_datetime(row["updated_at"]),
     )

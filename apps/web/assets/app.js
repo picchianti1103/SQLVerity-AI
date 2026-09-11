@@ -5,6 +5,7 @@ const state = {
   authMode: "none",
   browserSession: null,
   connected: false,
+  discovery: null,
   capabilities: null,
   tenants: [],
   tenantId: "",
@@ -22,6 +23,8 @@ const state = {
   preflightReviewed: false,
   flashTimer: null,
 };
+
+const requests = new globalThis.SQLVerityRequests(api);
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => Array.from(document.querySelectorAll(selector));
@@ -104,6 +107,7 @@ function showFlash(message, kind = "success") {
 }
 
 function handleError(error, prefix = t("app.operationFailed")) {
+  if (error?.name === "AbortError") return;
   const detail = error instanceof Error ? error.message : String(error);
   const notSent = error instanceof APIError && error.structured?.provider_invoked === false
     ? t("app.providerNotInvoked")
@@ -323,6 +327,7 @@ function renderTenantOptions() {
 }
 
 function updateContextHeader() {
+  renderPermissions();
   $("#header-tenant").textContent = state.tenantName || state.tenantId || t("app.notSelected");
   $("#header-source").textContent = state.source ? state.source.name : t("app.notSelected");
   $("#import-target").textContent = state.source ? `${state.source.name} · ${state.source.dialect}` : "no data source";
@@ -414,9 +419,9 @@ function updateAcquisitionOptions() {
   const source = state.source;
   const capabilities = new Set(source?.capabilities || []);
   const allowed = {
-    introspect: Boolean(source) && capabilities.has("introspect") && source.source_type !== "authorized_query",
-    ddl: Boolean(source) && ["ddl_import", "hybrid"].includes(source.source_type),
-    manual: Boolean(source) && ["manual_schema", "hybrid"].includes(source.source_type),
+    introspect: permitted("data_source.manage") && Boolean(source) && capabilities.has("introspect") && source.source_type !== "authorized_query",
+    ddl: permitted("data_source.manage") && Boolean(source) && ["ddl_import", "hybrid"].includes(source.source_type),
+    manual: permitted("data_source.manage") && Boolean(source) && ["manual_schema", "hybrid"].includes(source.source_type),
   };
   $$('[data-import-tab]').forEach((tab) => {
     tab.disabled = !allowed[tab.dataset.importTab];
@@ -448,68 +453,94 @@ function updateAcquisitionOptions() {
 async function connectConsole(event) {
   event.preventDefault();
   const button = event.submitter;
-  state.token = $("#api-token").value.trim();
-  if (!state.token) return;
+  const token = $("#api-token").value.trim();
+  if (!token) return;
+  resetConsoleSession();
+  state.token = token;
   state.authMode = "api_key";
   state.browserSession = null;
-  setBusy(button, true, "Connecting…");
+  const op = requests.begin("connectConsole", "session");
+  op.busy(button, "Connecting…");
   try {
     await loadAuthenticatedContext();
+    op.check();
   } catch (error) {
+    if (!op.current()) return;
     state.token = "";
     state.authMode = "none";
     state.connected = false;
     renderConnection();
     handleError(error, "Connection rejected");
   } finally {
-    setBusy(button, false);
+    op.finish();
   }
+}
+
+function selectedTenant() {
+  return state.discovery?.tenants.find((tenant) => tenant.id === state.tenantId);
+}
+
+function permitted(permission, tenantOnly = false) {
+  if (state.discovery?.platform_permissions.includes("platform.manage")) return true;
+  const tenant = selectedTenant();
+  return Boolean(tenant?.permissions.includes(permission)
+    || (!tenantOnly && state.source?.permissions?.includes(permission)));
+}
+
+function renderPermissions() {
+  $("#tenant-form").hidden = !state.discovery?.platform_permissions.includes("platform.manage");
+  $("#source-form").hidden = !permitted("data_source.manage", true);
+  $("#federated-principal-form").hidden = !permitted("security.manage", true);
+  $("#provider-policy-form").hidden = !permitted("security.manage");
+  $("#test-connection").disabled = !permitted("data_source.manage");
+  $("#enqueue-inference").disabled = !permitted("semantic.manage");
+  $('[data-panel="query"]').disabled = !permitted("query.use");
+  const scope = $("#policy-source-scope");
+  scope.disabled = !permitted("security.manage", true);
+  if (scope.disabled) scope.checked = true;
+}
+
+function clearContextResults() {
+  $("#provider-policy-form").reset();
+  $("#policy-deployment-summary").textContent = "Select a configured provider.";
+  for (const id of ["#provider-select", "#inference-provider", "#policy-provider"]) $(id).value = "";
+  for (const selector of ["#import-result", "#admin-operation-result", "#intent-correction-result"]) {
+    $(selector).hidden = true;
+    $(selector).replaceChildren();
+  }
+  renderAdminItems($("#principal-list"), [], "Select a tenant to load identities.", () => node("div"));
+  renderAdminItems($("#job-list"), [], "Select a tenant to load jobs.", () => node("div"));
+  state.privacyProviders = [];
+  renderPrivacyProviders();
 }
 
 async function loadAuthenticatedContext() {
-  let restricted = false;
+  const op = requests.begin("authenticated-context", "session");
   try {
-    state.tenants = await api("/v1/tenants");
-  } catch (error) {
-    if (error instanceof APIError && error.status === 403) {
-      state.tenants = [];
-      restricted = true;
-    } else {
-      throw error;
+    state.discovery = await op.api("/v1/session");
+    state.tenants = state.discovery.tenants;
+    state.capabilities = state.discovery.platform_permissions.includes("platform.manage")
+      ? await op.api("/v1/system/capabilities") : null;
+    state.connected = true;
+    renderConnection();
+    renderTenantOptions();
+    renderCapabilities();
+    renderPermissions();
+    if (state.tenants.length === 1) {
+      await selectTenant(state.tenants[0].id, state.tenants[0].name);
+      op.check();
     }
-  }
-  try {
-    state.capabilities = await api("/v1/system/capabilities");
+    showFlash(t("connection.ready"));
   } catch (error) {
-    if (!(error instanceof APIError && error.status === 403)) throw error;
-    state.capabilities = null;
-    restricted = true;
+    if (!op.current()) return;
+    throw error;
   }
-  state.connected = true;
-  renderConnection();
-  renderTenantOptions();
-  renderCapabilities();
-  if (state.browserSession && state.browserSession.tenant_id) {
-    await selectTenant(state.browserSession.tenant_id, state.browserSession.tenant_id);
-  }
-  showFlash(
-    restricted
-      ? t("connection.restricted")
-      : t("connection.ready"),
-  );
 }
 
-async function disconnectConsole() {
-  if (state.authMode === "oidc") {
-    try {
-      await fetch("/auth/oidc/logout", {
-        method: "POST",
-        headers: {"X-CSRF-Token": readCookie("sqlverity_csrf")},
-      });
-    } catch (error) {
-      handleError(error, "SSO sign-out failed");
-    }
-  }
+function resetConsoleSession() {
+  requests.invalidate("session");
+  state.discovery = null;
+  clearContextResults();
   state.token = "";
   state.authMode = "none";
   state.browserSession = null;
@@ -537,38 +568,57 @@ async function disconnectConsole() {
   renderPrivacyProviders();
   renderQueryPrivacyStatus();
   updateContextHeader();
+}
+
+async function disconnectConsole() {
+  const wasOIDC = state.authMode === "oidc";
+  resetConsoleSession();
+  const op = requests.begin("logout", "session");
   showFlash(t("connection.removed"));
+  if (wasOIDC) {
+    try {
+      await op.wait(fetch("/auth/oidc/logout", {
+        method: "POST", headers: {"X-CSRF-Token": readCookie("sqlverity_csrf")},
+      }));
+    } catch (error) {
+      if (op.current()) handleError(error, "SSO sign-out failed");
+    }
+  }
 }
 
 async function initializeOIDC() {
+  const op = requests.begin("initializeOIDC", "session");
   try {
-    const configResponse = await fetch("/auth/oidc/config", {headers: {"Accept": "application/json"}});
+    const configResponse = await op.wait(fetch("/auth/oidc/config", {headers: {"Accept": "application/json"}}));
     if (!configResponse.ok) return;
-    const config = await configResponse.json();
+    const config = await op.wait(configResponse.json());
     const login = $("#oidc-login");
     login.hidden = !config.enabled;
     if (config.login_url) login.href = config.login_url;
     if (!config.enabled) return;
-    const sessionResponse = await fetch("/auth/oidc/session", {
+    const sessionResponse = await op.wait(fetch("/auth/oidc/session", {
       headers: {"Accept": "application/json"},
-    });
+    }));
     if (!sessionResponse.ok) return;
-    state.browserSession = await sessionResponse.json();
+    state.browserSession = await op.wait(sessionResponse.json());
     state.authMode = "oidc";
     state.connected = true;
     await loadAuthenticatedContext();
+    op.check();
   } catch (error) {
+    if (!op.current()) return;
     handleError(error, "Could not restore the SSO session");
   }
 }
 
 async function createTenant(event) {
+  const op = requests.begin("createTenant", "tenant");
   event.preventDefault();
   const button = event.submitter;
   const name = $("#tenant-name").value.trim();
-  setBusy(button, true, "Creating…");
+  op.busy(button, "Creating…");
   try {
-    const tenant = await api("/v1/tenants", {
+    const tenant = await op.api("/v1/tenants", {
       method: "POST",
       body: JSON.stringify({name}),
     });
@@ -576,15 +626,21 @@ async function createTenant(event) {
     $("#tenant-name").value = "";
     renderTenantOptions();
     await selectTenant(tenant.id, tenant.name);
+    op.check();
     showFlash(`Tenant “${tenant.name}” created.`);
   } catch (error) {
+    if (!op.current()) return;
     handleError(error, "Could not create the tenant");
   } finally {
-    setBusy(button, false);
+    op.finish();
   }
 }
 
 async function selectTenant(id, name = "") {
+  requests.invalidate("tenant");
+  state.sources = [];
+  renderSources();
+  clearContextResults();
   state.tenantId = id;
   const knownTenant = state.tenants.find((tenant) => tenant.id === id);
   state.tenantName = name || (knownTenant ? knownTenant.name : id);
@@ -609,16 +665,24 @@ async function loadSources() {
     renderSources();
     return;
   }
+  const op = requests.begin("sources", "tenant");
   try {
-    state.sources = await api(`/v1/tenants/${encodeURIComponent(state.tenantId)}/data-sources`);
+    state.discovery = await op.api("/v1/session");
+    state.tenants = state.discovery.tenants;
+    state.sources = (selectedTenant()?.data_sources || []).map((entry) => ({
+      ...entry.source, permissions: entry.permissions,
+    }));
     if (state.sourceId) {
       state.source = state.sources.find((source) => source.id === state.sourceId) || null;
-      if (!state.source) state.sourceId = "";
+      if (!state.source) selectSource("");
     }
+    renderTenantOptions();
     renderSources();
     updateContextHeader();
   } catch (error) {
+    if (!op.current()) return;
     state.sources = [];
+    selectSource("");
     renderSources();
     handleError(error, "Could not load data sources");
   }
@@ -649,6 +713,9 @@ function renderSources() {
 }
 
 function selectSource(id) {
+  if (id && !state.sources.some((source) => source.id === id)) return;
+  requests.invalidate("source");
+  clearContextResults();
   state.sourceId = id;
   state.source = state.sources.find((source) => source.id === id) || null;
   state.schema = null;
@@ -666,6 +733,7 @@ function selectSource(id) {
 }
 
 async function createSource(event) {
+  const op = requests.begin("createSource", "source");
   event.preventDefault();
   if (!state.tenantId) {
     showFlash("Select a tenant first.", "error");
@@ -681,21 +749,23 @@ async function createSource(event) {
     capabilities,
     connection_secret_ref: secretRef || null,
   };
-  setBusy(button, true, "Registering…");
+  op.busy(button, "Registering…");
   try {
-    const source = await api(`/v1/tenants/${encodeURIComponent(state.tenantId)}/data-sources`, {
+    const source = await op.api(`/v1/tenants/${encodeURIComponent(state.tenantId)}/data-sources`, {
       method: "POST",
       body: JSON.stringify(payload),
     });
     event.target.reset();
     renderSourceModeGuidance();
     await loadSources();
+    op.check();
     selectSource(source.id);
     showFlash(`Data source “${source.name}” registered. Populate its catalog next.`);
   } catch (error) {
+    if (!op.current()) return;
     handleError(error, "Could not register the data source");
   } finally {
-    setBusy(button, false);
+    op.finish();
   }
 }
 
@@ -720,28 +790,31 @@ function renderImportResult(result) {
 }
 
 async function runIntrospection() {
+  const op = requests.begin("runIntrospection", "source");
   if (!requireSource()) return;
   const button = $("#run-introspection");
-  setBusy(button, true, "Introspecting…");
+  op.busy(button, "Introspecting…");
   try {
-    const result = await api(sourcePath("/ingestions"), {method: "POST"});
+    const result = await op.api(sourcePath("/ingestions"), {method: "POST"});
     renderImportResult(result);
     showFlash("Introspection completed and a new catalog version was created.");
   } catch (error) {
+    if (!op.current()) return;
     handleError(error, "Introspection failed");
   } finally {
-    setBusy(button, false);
+    op.finish();
   }
 }
 
 async function importDDL(event) {
+  const op = requests.begin("importDDL", "source");
   event.preventDefault();
   if (!requireSource()) return;
   const button = event.submitter;
   const defaultSchema = $("#default-schema").value.trim();
-  setBusy(button, true, "Importing…");
+  op.busy(button, "Importing…");
   try {
-    const result = await api(sourcePath("/imports/ddl"), {
+    const result = await op.api(sourcePath("/imports/ddl"), {
       method: "POST",
       body: JSON.stringify({
         ddl: $("#ddl-input").value,
@@ -751,13 +824,15 @@ async function importDDL(event) {
     renderImportResult(result);
     showFlash("DDL parsed without execution; the catalog was updated.");
   } catch (error) {
+    if (!op.current()) return;
     handleError(error, "DDL import failed");
   } finally {
-    setBusy(button, false);
+    op.finish();
   }
 }
 
 async function importManual(event) {
+  const op = requests.begin("importManual", "source");
   event.preventDefault();
   if (!requireSource()) return;
   const button = event.submitter;
@@ -765,21 +840,23 @@ async function importManual(event) {
   try {
     payload = JSON.parse($("#manual-input").value);
   } catch (error) {
+    if (!op.current()) return;
     handleError(error, "Invalid JSON");
     return;
   }
-  setBusy(button, true, "Importing…");
+  op.busy(button, "Importing…");
   try {
-    const result = await api(sourcePath("/imports/manual"), {
+    const result = await op.api(sourcePath("/imports/manual"), {
       method: "POST",
       body: JSON.stringify(payload),
     });
     renderImportResult(result);
     showFlash("The manual snapshot was validated and imported.");
   } catch (error) {
+    if (!op.current()) return;
     handleError(error, "Manual import failed");
   } finally {
-    setBusy(button, false);
+    op.finish();
   }
 }
 
@@ -799,19 +876,21 @@ function resetSchema() {
 }
 
 async function loadSchema() {
+  const op = requests.begin("loadSchema", "source");
   if (!requireSource()) return;
   const button = $("#refresh-schema");
-  setBusy(button, true, "Loading…");
+  op.busy(button, "Loading…");
   try {
-    state.schema = await api(sourcePath("/schema"));
+    state.schema = await op.api(sourcePath("/schema"));
     state.selectedObjectId = state.schema.objects.length ? state.schema.objects[0].id : "";
     renderSchema();
     showFlash(`Catalog schema v${state.schema.catalog_version} loaded.`);
   } catch (error) {
+    if (!op.current()) return;
     resetSchema();
     handleError(error, "Schema unavailable");
   } finally {
-    setBusy(button, false);
+    op.finish();
   }
 }
 
@@ -949,6 +1028,7 @@ const privacyDecisionLabels = {
 };
 
 function invalidatePreflight() {
+  requests.invalidate("query");
   state.preflight = null;
   state.preflightReviewed = false;
   state.pendingForceSemantic = false;
@@ -983,6 +1063,7 @@ function selectPrivacyProvider(item) {
   $$(".provider-card").forEach((card) => {
     card.classList.toggle("is-active", card.dataset.providerId === item.deployment.provider_id);
   });
+  renderPermissions();
   renderPolicyScopeSummary();
   invalidatePreflight();
   renderQueryPrivacyStatus();
@@ -1033,6 +1114,7 @@ function renderPrivacyProviders() {
 }
 
 async function loadPrivacyData() {
+  const op = requests.begin("loadPrivacyData", "source");
   if (!state.tenantId || !state.sourceId) {
     state.privacyProviders = [];
     renderPrivacyProviders();
@@ -1040,7 +1122,7 @@ async function loadPrivacyData() {
     return;
   }
   try {
-    state.privacyProviders = await api(sourcePath("/privacy/providers"));
+    state.privacyProviders = await op.api(sourcePath("/privacy/providers"));
     renderPrivacyProviders();
     if (state.privacyProviders.length === 1 && !$("#inference-provider").value.trim()) {
       $("#inference-provider").value = state.privacyProviders[0].deployment.provider_id;
@@ -1050,6 +1132,7 @@ async function loadPrivacyData() {
     if (selected) selectPrivacyProvider(selected);
     renderQueryPrivacyStatus();
   } catch (error) {
+    if (!op.current()) return;
     state.privacyProviders = [];
     renderPrivacyProviders();
     renderQueryPrivacyStatus();
@@ -1093,7 +1176,7 @@ function renderQueryPrivacyStatus() {
   const denied = item.policy && !item.policy.allowed;
   const purposeDenied = item.policy && !item.policy.allowed_purposes.includes("sql_proposal_generation");
   const deploymentMismatch = !item.deployment_matches_policy;
-  const blocked = missing || denied || purposeDenied || item.review_required || deploymentMismatch;
+  const blocked = !permitted("query.use") || missing || denied || purposeDenied || item.review_required || deploymentMismatch;
   $("#query-policy-indicator").textContent = item.policy
     ? `Policy: ${item.policy_scope} · max ${item.policy.maximum_classification}${item.review_required ? " · review required" : ""}`
     : "Policy: missing";
@@ -1113,6 +1196,7 @@ function renderQueryPrivacyStatus() {
 }
 
 function resetQueryWorkflow() {
+  requests.invalidate("query");
   state.queryRun = null;
   $("#query-workflow").hidden = true;
   $("#explain-section").hidden = true;
@@ -1198,13 +1282,15 @@ function renderPreflight() {
 
 async function requestAITransferPreflight(forceSemantic, button) {
   if (!requireSource()) return;
-  setBusy(button, true, "Running local check…");
+  if (!forceSemantic) resetQueryWorkflow();
+  invalidatePreflight();
+  const op = requests.begin("requestAITransferPreflight", "query");
+  op.busy(button, "Running local check…");
   try {
-    if (!forceSemantic) resetQueryWorkflow();
     const semanticOptions = forceSemantic
       ? {privacy_mode: "governed_semantic", force_semantic: true}
       : {privacy_mode: $("#privacy-mode-select").value, force_semantic: false};
-    state.preflight = await api(sourcePath("/sql/preflights"), {
+    state.preflight = await op.api(sourcePath("/sql/preflights"), {
       method: "POST",
       body: JSON.stringify({
         provider_id: $("#provider-select").value.trim(),
@@ -1223,10 +1309,11 @@ async function requestAITransferPreflight(forceSemantic, button) {
       ? t("privacy.dryRunSuccess")
       : t("privacy.dryRunBlocked"), state.preflight.allowed ? "success" : "error");
   } catch (error) {
+    if (!op.current()) return;
     invalidatePreflight();
     handleError(error, "Privacy preflight failed");
   } finally {
-    setBusy(button, false);
+    op.finish();
   }
 }
 
@@ -1250,11 +1337,12 @@ function renderTransferReceipt(receipt) {
 }
 
 async function confirmAITransfer() {
+  const op = requests.begin("confirmAITransfer", "query");
   if (!state.preflight || !state.preflight.confirmation_token || !requireSource()) return;
   const button = $("#confirm-ai-transfer");
-  setBusy(button, true, "Sending…");
+  op.busy(button, "Sending…");
   try {
-    state.queryRun = await api(sourcePath("/sql/proposals"), {
+    state.queryRun = await op.api(sourcePath("/sql/proposals"), {
       method: "POST",
       body: JSON.stringify({
         provider_id: $("#provider-select").value.trim(),
@@ -1267,7 +1355,8 @@ async function confirmAITransfer() {
         confirmation_token: state.preflight.confirmation_token,
       }),
     });
-    await ensureSchemaForCorrections(state.queryRun);
+    await ensureSchemaForCorrections(state.queryRun, op);
+    op.check();
     renderProposal();
     renderTransferReceipt(state.queryRun.transfer_receipt);
     state.preflight = null;
@@ -1280,13 +1369,14 @@ async function confirmAITransfer() {
         : t("query.generated"),
     );
   } catch (error) {
+    if (!op.current()) return;
+    handleError(error, "SQL generation failed");
     invalidatePreflight();
     if (error instanceof APIError && error.structured?.code === "stale_preflight") {
       await loadPrivacyData();
     }
-    handleError(error, "SQL generation failed");
   } finally {
-    setBusy(button, false);
+    op.finish();
   }
 }
 
@@ -1302,9 +1392,11 @@ function updateSemanticRetryAvailability() {
 }
 
 async function retryProposalSemantically() {
+  const op = requests.begin("retryProposalSemantically", "source");
   if (!state.queryRun || !requireSource()) return;
   const button = $("#semantic-retry-button");
   await requestAITransferPreflight(true, button);
+  if (!op.current()) return;
   updateSemanticRetryAvailability();
 }
 
@@ -1346,11 +1438,12 @@ const privacyModeLabels = {
   governed_semantic: "governed semantics",
 };
 
-async function ensureSchemaForCorrections(run) {
+async function ensureSchemaForCorrections(run, op) {
   if (state.schema?.catalog_version === run.context.catalog_version) return;
   try {
-    state.schema = await api(sourcePath("/schema"));
-  } catch {
+    state.schema = await op.api(sourcePath("/schema"));
+  } catch (error) {
+    if (!op.current()) throw error;
     // The retrieved generation context still provides safe correction candidates.
   }
 }
@@ -1380,10 +1473,11 @@ function applyIntentMemoryResult(result) {
 }
 
 async function saveIntentCorrection(entity, termInput, referenceSelect, reasonInput, button) {
+  const op = requests.begin("saveIntentCorrection", "query");
   if (!state.queryRun) return;
-  setBusy(button, true, "Saving…");
+  op.busy(button, "Saving…");
   try {
-    const result = await api(
+    const result = await op.api(
       sourcePath(`/query-requests/${encodeURIComponent(state.queryRun.request_id)}/intent-corrections`),
       {
         method: "POST",
@@ -1404,20 +1498,22 @@ async function saveIntentCorrection(entity, termInput, referenceSelect, reasonIn
         : "Interpretation confirmed and saved to semantic memory.",
     );
   } catch (error) {
+    if (!op.current()) return;
     handleError(error, "Could not correct semantic memory");
   } finally {
-    setBusy(button, false);
+    op.finish();
   }
 }
 
 async function saveFreeTextIntentCorrection(event) {
+  const op = requests.begin("saveFreeTextIntentCorrection", "query");
   event.preventDefault();
   if (!state.queryRun) return;
   const button = event.submitter || $("#interpret-correction");
   const resultView = $("#intent-correction-result");
-  setBusy(button, true, "Interpreting…");
+  op.busy(button, "Interpreting…");
   try {
-    const run = await api(
+    const run = await op.api(
       sourcePath(`/query-requests/${encodeURIComponent(state.queryRun.request_id)}/intent-corrections/from-text`),
       {
         method: "POST",
@@ -1466,10 +1562,11 @@ async function saveFreeTextIntentCorrection(event) {
         : "Correction interpreted and saved to semantic memory.",
     );
   } catch (error) {
+    if (!op.current()) return;
     resultView.hidden = true;
     handleError(error, "Could not interpret the correction");
   } finally {
-    setBusy(button, false);
+    op.finish();
   }
 }
 
@@ -1600,6 +1697,21 @@ function renderQueryParameters(parameters) {
   });
 }
 
+function invalidateQueryBindings() {
+  requests.invalidate("query");
+  $("#explain-section").hidden = true;
+  $("#approve-button").disabled = true;
+  $("#execute-button").disabled = true;
+}
+
+function lockQueryParameters(locked) {
+  $$("#parameter-fields input, #parameter-fields select").forEach((input) => {
+    const nullable = input.dataset.parameterName
+      ? $(`[data-null-parameter="${input.dataset.parameterName}"]`) : null;
+    input.disabled = locked || Boolean(nullable?.checked);
+  });
+}
+
 function queryParameterBindings() {
   if (!state.queryRun) return {};
   const bindings = {};
@@ -1682,14 +1794,18 @@ function renderProposal() {
 }
 
 async function explainQuery() {
+  const op = requests.begin("explainQuery", "query");
   if (!state.queryRun) return;
+  const queryRun = state.queryRun;
   const button = $("#explain-button");
-  setBusy(button, true, "Explain…");
+  op.busy(button, "Explain…");
   try {
-    const result = await api(sourcePath(`/query-requests/${encodeURIComponent(state.queryRun.request_id)}/explain`), {
+    const result = await op.api(sourcePath(`/query-requests/${encodeURIComponent(state.queryRun.request_id)}/explain`), {
       method: "POST",
       body: JSON.stringify({parameters: queryParameterBindings()}),
     });
+    if (state.queryRun !== queryRun) return;
+    queryRun.explain_revision = result.revision;
     $("#estimated-cost").textContent = result.estimated_total_cost ?? "not provided";
     $("#estimated-rows").textContent = result.estimated_rows ?? "not provided";
     $("#explain-time").textContent = `${result.elapsed_ms} ms`;
@@ -1700,31 +1816,40 @@ async function explainQuery() {
     setWorkflowStage("explain");
     showFlash(t("query.explainComplete"));
   } catch (error) {
+    if (!op.current()) return;
     handleError(error, "EXPLAIN failed");
   } finally {
-    setBusy(button, false);
+    op.finish();
   }
 }
 
 async function approveQuery() {
+  const op = requests.begin("approveQuery", "query");
   if (!state.queryRun) return;
+  const queryRun = state.queryRun;
   const button = $("#approve-button");
-  setBusy(button, true, "Approving…");
+  op.busy(button, "Approving…");
   try {
-    const result = await api(sourcePath(`/query-requests/${encodeURIComponent(state.queryRun.request_id)}/approval`), {
+    const result = await op.api(sourcePath(`/query-requests/${encodeURIComponent(state.queryRun.request_id)}/approval`), {
       method: "POST",
-      body: JSON.stringify({parameters: queryParameterBindings()}),
+      body: JSON.stringify({
+        parameters: queryParameterBindings(),
+        expected_explain_revision: queryRun.explain_revision ?? 0,
+      }),
     });
+    if (state.queryRun !== queryRun) return;
     $("#request-state").textContent = result.state;
+    lockQueryParameters(true);
     $("#execute-button").disabled = false;
     $("#explain-button").disabled = true;
     $("#action-hint").textContent = "Ticket approved. Execution will use the same validated query in read-only mode.";
     setWorkflowStage("approval");
     showFlash(t("query.approved"));
   } catch (error) {
+    if (!op.current()) return;
     handleError(error, "Approval failed");
   } finally {
-    setBusy(button, false);
+    op.finish();
   }
 }
 
@@ -1754,14 +1879,20 @@ function renderResultTable(result) {
 }
 
 async function executeQuery() {
+  const op = requests.begin("executeQuery", "query");
   if (!state.queryRun) return;
+  const queryRun = state.queryRun;
+  const requestPath = sourcePath(`/query-requests/${encodeURIComponent(queryRun.request_id)}`);
+  let canExecute = true;
   const button = $("#execute-button");
-  setBusy(button, true, "Executing…");
+  op.busy(button, "Executing…");
   try {
-    const run = await api(sourcePath(`/query-requests/${encodeURIComponent(state.queryRun.request_id)}/executions`), {
+    const run = await op.api(`${requestPath}/executions`, {
       method: "POST",
       body: JSON.stringify({parameters: queryParameterBindings()}),
     });
+    if (state.queryRun !== queryRun) return;
+    canExecute = false;
     $("#request-state").textContent = run.query_request.state;
     $("#result-summary").textContent = run.answer.summary;
     $("#privacy-badge").textContent = `${run.privacy.processing_mode} · ${run.privacy.maximum_classification}`;
@@ -1774,9 +1905,35 @@ async function executeQuery() {
     setWorkflowStage("execution");
     showFlash(t("query.executed"));
   } catch (error) {
+    if (!op.current()) return;
+    if (state.queryRun !== queryRun) return;
+    if (error instanceof APIError && error.status === 409) {
+      canExecute = false;
+      try {
+        const current = await op.api(requestPath);
+        if (state.queryRun !== queryRun) return;
+        $("#request-state").textContent = current.state;
+        canExecute = current.state === "approved";
+        if (current.state === "ready_for_preview") {
+          lockQueryParameters(false);
+          queryRun.explain_revision = current.explain_revision;
+          $("#explain-button").disabled = false;
+          $("#approve-button").disabled = false;
+          $("#action-hint").textContent = "Execution policy changed. Review the plan and approve again.";
+          setWorkflowStage("explain");
+        }
+      } catch (refreshError) {
+    if (!op.current()) return;
+        if (state.queryRun !== queryRun) return;
+        handleError(refreshError, "Could not refresh query state");
+      }
+    }
     handleError(error, "Execution failed");
   } finally {
-    setBusy(button, false);
+    if (op.current() && state.queryRun === queryRun) {
+      op.finish();
+      button.disabled = !canExecute;
+    }
   }
 }
 
@@ -1802,6 +1959,7 @@ function renderFederatedRoleGuidance() {
 }
 
 async function loadAdminData() {
+  const op = requests.begin("loadAdminData", "source");
   if (!state.tenantId) {
     renderAdminItems($("#principal-list"), [], "Select a tenant.", () => node("div"));
     renderAdminItems($("#job-list"), [], "Select a tenant.", () => node("div"));
@@ -1809,7 +1967,7 @@ async function loadAdminData() {
   }
   const tenantPath = `/v1/tenants/${encodeURIComponent(state.tenantId)}`;
   try {
-    const principals = await api(`${tenantPath}/security/principals`);
+    const principals = await op.api(`${tenantPath}/security/principals`);
     renderAdminItems($("#principal-list"), principals, "No identities provisioned.", (access) => {
       const item = node("div", "admin-item");
       item.append(node("strong", "", access.principal.display_name));
@@ -1822,10 +1980,11 @@ async function loadAdminData() {
       return item;
     });
   } catch (error) {
+    if (!op.current()) return;
     renderAdminItems($("#principal-list"), [], error.message, () => node("div"));
   }
   try {
-    const jobs = await api(`${tenantPath}/background-jobs?limit=50`);
+    const jobs = await op.api(`${tenantPath}/background-jobs?limit=50`);
     renderAdminItems($("#job-list"), jobs, "No queued jobs.", (job) => {
       const item = node("div", "admin-item");
       item.append(node("strong", "", `${job.job_type} · ${job.status}`));
@@ -1840,19 +1999,21 @@ async function loadAdminData() {
       return item;
     });
   } catch (error) {
+    if (!op.current()) return;
     renderAdminItems($("#job-list"), [], error.message, () => node("div"));
   }
 }
 
 async function createFederatedPrincipal(event) {
+  const op = requests.begin("createFederatedPrincipal", "source");
   event.preventDefault();
   if (!state.tenantId) return showFlash("Select a tenant first.", "error");
   const sourceScoped = $("#federated-source-scope").checked;
   if (sourceScoped && !state.sourceId) return showFlash("Select the data source to authorize.", "error");
   const button = event.submitter;
-  setBusy(button, true, "Provisioning…");
+  op.busy(button, "Provisioning…");
   try {
-    await api(`/v1/tenants/${encodeURIComponent(state.tenantId)}/security/federated-principals`, {
+    await op.api(`/v1/tenants/${encodeURIComponent(state.tenantId)}/security/federated-principals`, {
       method: "POST",
       body: JSON.stringify({
         subject: $("#federated-subject").value.trim(),
@@ -1864,15 +2025,18 @@ async function createFederatedPrincipal(event) {
     event.target.reset();
     renderFederatedRoleGuidance();
     await loadAdminData();
+    op.check();
     showFlash("OIDC identity provisioned without creating an API key.");
   } catch (error) {
+    if (!op.current()) return;
     handleError(error, "Identity provisioning failed");
   } finally {
-    setBusy(button, false);
+    op.finish();
   }
 }
 
 async function saveProviderPolicy(event) {
+  const op = requests.begin("saveProviderPolicy", "source");
   event.preventDefault();
   if (!state.tenantId) return showFlash("Select a tenant first.", "error");
   const sourceScoped = $("#policy-source-scope").checked;
@@ -1883,11 +2047,11 @@ async function saveProviderPolicy(event) {
     ? `/data-sources/${encodeURIComponent(state.sourceId)}`
     : "";
   const button = event.submitter;
-  setBusy(button, true, "Saving…");
+  op.busy(button, "Saving…");
   try {
     const purposes = $$('input[name="policy-purpose"]:checked').map((input) => input.value);
     if (!purposes.length) throw new Error("Select at least one authorized purpose.");
-    await api(`${base}${scope}/provider-egress-policies/${encodeURIComponent(providerId)}`, {
+    await op.api(`${base}${scope}/provider-egress-policies/${encodeURIComponent(providerId)}`, {
       method: "PUT",
       body: JSON.stringify({
         allowed: $("#policy-allowed").checked,
@@ -1900,57 +2064,67 @@ async function saveProviderPolicy(event) {
     });
     $("#policy-acknowledged").checked = false;
     await loadPrivacyData();
+    op.check();
     showFlash("Provider authorization updated and bound to the declared deployment.");
   } catch (error) {
+    if (!op.current()) return;
     handleError(error, "Could not save the policy");
   } finally {
-    setBusy(button, false);
+    op.finish();
   }
 }
 
 async function testSelectedConnection() {
+  const op = requests.begin("testSelectedConnection", "source");
   if (!requireSource()) return;
   const button = $("#test-connection");
-  setBusy(button, true, "Test…");
+  op.busy(button, "Test…");
   try {
-    const result = await api(sourcePath("/connection-tests"), {method: "POST"});
+    const result = await op.api(sourcePath("/connection-tests"), {method: "POST"});
     const box = $("#admin-operation-result");
     box.textContent = `Connection verified: ${result.object_count} objects, ${result.relationship_count} relationships, capabilities ${result.capabilities.join(", ")}.`;
     box.hidden = false;
     showFlash("Connection test completed and audited.");
   } catch (error) {
+    if (!op.current()) return;
     handleError(error, "Connection test failed");
   } finally {
-    setBusy(button, false);
+    op.finish();
   }
 }
 
 async function enqueueInferenceJob() {
+  const op = requests.begin("enqueueInferenceJob", "source");
   if (!requireSource()) return;
   const providerId = $("#inference-provider").value.trim();
   if (!providerId) return showFlash("Select the provider for schema description inference.", "error");
   const button = $("#enqueue-inference");
-  setBusy(button, true, "Queuing…");
+  op.busy(button, "Queuing…");
   try {
-    await api(sourcePath("/semantics/inference-jobs"), {
+    await op.api(sourcePath("/semantics/inference-jobs"), {
       method: "POST",
       body: JSON.stringify({provider_id: providerId, max_attempts: 3}),
     });
     await loadAdminData();
+    op.check();
     showFlash("Semantic inference queued in the durable worker.");
   } catch (error) {
+    if (!op.current()) return;
     handleError(error, "Could not queue semantic inference");
   } finally {
-    setBusy(button, false);
+    op.finish();
   }
 }
 
 async function cancelJob(jobId) {
+  const op = requests.begin("cancelJob", "source");
   try {
-    await api(`/v1/tenants/${encodeURIComponent(state.tenantId)}/background-jobs/${encodeURIComponent(jobId)}`, {method: "DELETE"});
+    await op.api(`/v1/tenants/${encodeURIComponent(state.tenantId)}/background-jobs/${encodeURIComponent(jobId)}`, {method: "DELETE"});
     await loadAdminData();
+    op.check();
     showFlash("Job cancelled.");
   } catch (error) {
+    if (!op.current()) return;
     handleError(error, "Could not cancel the job");
   }
 }
@@ -1991,7 +2165,7 @@ function bindEvents() {
     const id = $("#tenant-id-manual").value.trim();
     if (!id) return;
     await selectTenant(id);
-    showFlash(`Tenant ID ${id} selected.`);
+    if (state.tenantId === id) showFlash(`Tenant ID ${id} selected.`);
   });
   $("#source-form").addEventListener("submit", createSource);
   $("#source-type").addEventListener("change", renderSourceModeGuidance);
@@ -2006,6 +2180,7 @@ function bindEvents() {
   $("#refresh-schema").addEventListener("click", loadSchema);
   $("#schema-search").addEventListener("input", renderSchema);
   $("#query-form").addEventListener("submit", generateProposal);
+  $("#parameter-fields").addEventListener("input", invalidateQueryBindings);
   ["#provider-select", "#question-input", "#classification-select", "#privacy-mode-select"].forEach((selector) => {
     $(selector).addEventListener("input", () => {
       invalidatePreflight();

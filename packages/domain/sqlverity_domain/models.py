@@ -282,6 +282,12 @@ class QueryRequest:
     estimated_db_cost: float | None = None
     estimated_db_rows: int | None = None
     explained_at: datetime | None = None
+    explain_revision: int = 0
+    explained_sql_hash: str | None = None
+    approved_explain_revision: int | None = None
+    approved_cost_policy_revision: int | None = None
+    approved_sql_hash: str | None = None
+    approved_parameter_value_hash: str | None = None
     parameter_definitions: tuple[QueryParameterDefinition, ...] = ()
     parameter_names: tuple[str, ...] = ()
     parameter_value_hash: str | None = None
@@ -344,7 +350,7 @@ class QueryRequest:
             != {name.casefold() for name in self.parameter_names}
         ):
             raise ValueError("Query parameter names must match their definitions")
-        lineage_names = tuple(item.output_name.casefold() for item in self.output_lineage)
+        lineage_names = tuple(item.output_name for item in self.output_lineage)
         if len(lineage_names) != len(set(lineage_names)):
             raise ValueError("Output lineage names must be unique")
         if self.parameter_value_hash is not None and (
@@ -1162,6 +1168,7 @@ class ExecutionCostPolicy:
     max_total_cost: float | None = None
     max_estimated_rows: int | None = None
     require_explain: bool = True
+    revision: int = 1
     id: str = field(default_factory=new_id)
     updated_at: datetime = field(default_factory=utc_now)
 

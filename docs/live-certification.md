@@ -1,14 +1,15 @@
 # Live certification
 
 SQLVerity AI keeps offline contract tests separate from tests that contact real databases or models.
-The `Live certification` workflow is manual so provider calls are never made, and never billed,
-without an explicit operator action.
+CI invokes the PostgreSQL job in `Live certification` on pushes and pull requests. Its provider
+job runs only through an explicit manual dispatch with selected providers.
 
 ## PostgreSQL integration
 
 The workflow starts PostgreSQL 17, loads `fixtures/live/postgresql_golden.sql`, applies every
 catalog migration through `PostgreSQLCatalogRepository`, and verifies real introspection,
-`EXPLAIN`, read-only execution, result bounds, and catalog readiness.
+`EXPLAIN`, read-only execution, result bounds, catalog readiness, physical identifier identity,
+and concurrent EXPLAIN/approval revision binding through independent catalog connections.
 
 Run the same test against a disposable local instance by setting an opaque reference:
 
@@ -19,6 +20,27 @@ $env:SQLVERITY_LIVE_POSTGRES='{"host":"127.0.0.1","port":5432,"database":"sqlver
 psql -d sqlverity_live -f fixtures/live/postgresql_golden.sql
 python -m pytest -q tests/live/test_postgresql_live.py
 ```
+
+## Console browser regressions
+
+The browser suite starts the real API on loopback with a temporary SQLite catalog, synthetic
+tenants, and scoped credentials. It checks analyst/viewer access and out-of-order schema responses
+across context changes. No provider credentials or model calls are required. Install the `dev`
+extra and a Playwright browser before opting in:
+
+```powershell
+python -m pip install -e ".[dev]"
+python -m playwright install chromium
+node --test tests/web/console.test.cjs
+$env:SQLVERITY_RUN_BROWSER_TESTS='true'
+python -m pytest -q tests/browser/test_console_browser.py
+```
+
+Node 22 or newer runs the deferred-response suite without npm packages. On a Windows machine with
+Microsoft Edge installed, set `SQLVERITY_BROWSER_CHANNEL=msedge` to use that browser instead of
+installing Chromium. CI installs Chromium and its Linux system dependencies, then runs both suites.
+The Node tests inject late successes and errors for schema/privacy/preflight/query work, OIDC,
+reconnection, logout, and parameter changes; the browser suite covers real DOM/API integration.
 
 ## Provider contract calls
 
@@ -58,3 +80,14 @@ provider, model id, deployment/residency/retention claims, policy and acknowledg
 preflight/receipt evidence, prompt revision, dataset hash, execution accuracy, p95 latency, average
 cost, timestamp, and reviewer. A combination is supported only after its live row is green;
 everything else remains experimental.
+
+## September review regressions
+
+The PostgreSQL job also runs the shared two-repository budget, lease, and approval/policy cases.
+These use synthetic providers and verify admission/settlement races without paid API calls.
+On 2026-09-11, PostgreSQL 17.11 on Windows passed 27 tests and 3 subtests, including physical
+identifier/search-path and duplicate-output checks. The same disposable runtime previously passed
+migrations through `0018` on a fresh database. The console passed 12 Node tests and three browser
+tests on Microsoft Edge with the real local API and synthetic data.
+This evidence covers the local PostgreSQL tests; CI execution and real-provider accuracy are
+separate checks. See [remediation status](review-remediation-2026-09.md).

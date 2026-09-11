@@ -259,6 +259,7 @@ def _configure_read_only_transaction(
     timeout_seconds: int,
 ) -> None:
     cursor.execute("SET TRANSACTION READ ONLY")
+    cursor.execute("SET LOCAL search_path = pg_catalog, pg_temp")
     cursor.execute(
         "SELECT pg_catalog.set_config('statement_timeout', %s, true)",
         (f"{timeout_seconds * 1_000}ms",),
@@ -302,10 +303,19 @@ def _optional_int(value: object, key: str) -> int | None:
 def _column_names(description: Any) -> tuple[str, ...]:
     if description is None:
         return ()
-    return tuple(
+    columns = tuple(
         item.name if hasattr(item, "name") else str(item[0])
         for item in description
     )
+    _require_unique_columns(columns)
+    return columns
+
+
+def _require_unique_columns(columns: tuple[str, ...]) -> None:
+    if len(columns) != len(set(columns)):
+        raise ReadOnlyExecutionError(
+            "Database returned duplicate output names; use distinct aliases"
+        )
 
 
 def _fetch_bounded_rows(
@@ -314,6 +324,7 @@ def _fetch_bounded_rows(
     max_rows: int,
     max_result_bytes: int,
 ) -> tuple[tuple[Mapping[str, Any], ...], int, str | None]:
+    _require_unique_columns(columns)
     rows: list[Mapping[str, Any]] = []
     result_bytes = 0
     while len(rows) < max_rows:

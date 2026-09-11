@@ -33,6 +33,7 @@ from packages.llm_gateway.sqlverity_llm_gateway import SchemaQuestionPolicyEngin
 from packages.query.sqlverity_query import (
     QueryExecutionPolicyBlockedError,
     QueryExecutionService,
+    QueryExecutionStateError,
 )
 from packages.result_engine.sqlverity_result_engine import DeterministicResultProcessor
 from packages.sql_engine.sqlverity_sql_engine import PostgreSQLSQLValidator
@@ -382,7 +383,7 @@ class AuthorizedQueryTests(unittest.TestCase):
             actor_id="reviewer",
             parameters=bindings,
         )
-        with self.assertRaisesRegex(QueryExecutionPolicyBlockedError, "differ"):
+        with self.assertRaises(QueryExecutionStateError):
             execution.explain(
                 tenant_id=self.tenant.id,
                 data_source_id=self.data_source.id,

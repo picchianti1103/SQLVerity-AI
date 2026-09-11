@@ -213,6 +213,7 @@ class ExplainResult:
     estimated_total_cost: float | None
     estimated_rows: int | None
     elapsed_ms: int
+    revision: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -242,6 +243,22 @@ class QueryRequestStore(Protocol):
         target: QueryRequestState,
         *,
         actor_id: str | None = None,
+        expected_explain_revision: int | None = None,
+        expected_cost_policy_revision: int | None = None,
+        approval_sql_hash: str | None = None,
+        approval_parameter_value_hash: str | None = None,
+    ) -> QueryRequest: ...
+
+    def record_query_explain(
+        self,
+        tenant_id: str,
+        request_id: str,
+        *,
+        expected_revision: int,
+        sql_hash: str,
+        parameter_value_hash: str | None,
+        parameter_names: tuple[str, ...],
+        result: ExplainResult,
     ) -> QueryRequest: ...
 
     def record_query_activity(

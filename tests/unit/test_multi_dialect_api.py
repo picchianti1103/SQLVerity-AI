@@ -129,7 +129,7 @@ class MultiDialectAPITests(unittest.TestCase):
                             "oracle",
                             "SALES",
                             "CREATE TABLE orders (id NUMBER(19) PRIMARY KEY)",
-                            "SALES.orders",
+                            "SALES.ORDERS",
                         ),
                         (
                             "mssql",

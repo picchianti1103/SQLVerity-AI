@@ -3,11 +3,12 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import Any
 
 from packages.cost_engine.sqlverity_cost_engine import CostEstimate, FinOpsService
+from packages.domain.sqlverity_domain.budget import LLMBudgetReservation, LLMBudgetUnavailableError
 from packages.domain.sqlverity_domain.contracts import (
     LLMProvider,
     LLMResponse,
@@ -16,7 +17,7 @@ from packages.domain.sqlverity_domain.contracts import (
     PolicyEngine,
     TokenEstimate,
 )
-from packages.domain.sqlverity_domain.models import Classification, LLMUsageEvent
+from packages.domain.sqlverity_domain.models import Classification, LLMUsageEvent, utc_now
 
 from .provider_http import close_if_supported
 
@@ -229,6 +230,8 @@ class LLMGateway:
         payload = _provider_payload(request, included)
 
         precall_cost: CostEstimate | None = None
+        reservation: LLMBudgetReservation | None = None
+        provider_dispatched = False
         try:
             capabilities = provider.capabilities()
             if capabilities.get("structured_output") is not True:
@@ -244,6 +247,7 @@ class LLMGateway:
                             "Active budget requires the provider to declare its model id"
                         )
                 else:
+                    precall_at = utc_now()
                     precall_cost = self._finops.estimate(
                         tenant_id=tenant_id,
                         provider_id=provider_id,
@@ -251,6 +255,7 @@ class LLMGateway:
                         input_tokens=estimate.input_tokens,
                         cached_input_tokens=estimate.cached_input_tokens,
                         output_tokens=estimate.output_tokens,
+                        at=precall_at,
                     )
                     if precall_cost is None:
                         if self._finops.has_active_budget(tenant_id):
@@ -258,72 +263,86 @@ class LLMGateway:
                                 "Active budget requires applicable model pricing"
                             )
                     else:
-                        budget = self._finops.authorize(tenant_id, precall_cost)
-                        if not budget.allowed:
-                            raise LLMBudgetExceededError(budget.reason)
+                        reservation = self._finops.reserve(
+                            tenant_id, provider_id, declared_model, precall_cost, at=precall_at,
+                        )
+                        self._finops.start(reservation)
+            provider_dispatched = True
             response = provider.generate_structured(payload)
-        except LLMGatewayError:
-            raise
-        except Exception as error:
-            raise LLMProviderCallError(f"LLM provider {provider_id} failed") from error
-
-        priced_estimate = (
-            self._finops.estimate(
-                tenant_id=tenant_id,
-                provider_id=provider_id,
-                model_id=response.model_id,
-                input_tokens=estimate.input_tokens,
-                cached_input_tokens=estimate.cached_input_tokens,
-                output_tokens=estimate.output_tokens,
+            priced_estimate = (
+                self._finops.estimate(
+                    tenant_id=tenant_id,
+                    provider_id=provider_id,
+                    model_id=response.model_id,
+                    input_tokens=estimate.input_tokens,
+                    cached_input_tokens=estimate.cached_input_tokens,
+                    output_tokens=estimate.output_tokens,
+                    at=reservation.created_at if reservation is not None else None,
+                )
+                if self._finops is not None
+                else None
             )
-            if self._finops is not None
-            else None
-        )
-        actual_cost = (
-            self._finops.estimate(
+            actual_cost = (
+                self._finops.estimate(
+                    tenant_id=tenant_id,
+                    provider_id=provider_id,
+                    model_id=response.model_id,
+                    input_tokens=response.input_tokens,
+                    cached_input_tokens=response.cached_input_tokens,
+                    output_tokens=response.output_tokens,
+                    at=reservation.created_at if reservation is not None else None,
+                )
+                if self._finops is not None
+                else None
+            )
+            applied_pricing = actual_cost or priced_estimate or precall_cost
+            usage = LLMUsageEvent(
                 tenant_id=tenant_id,
                 provider_id=provider_id,
                 model_id=response.model_id,
+                purpose=request.purpose,
+                estimated_input_tokens=estimate.input_tokens,
+                estimated_output_tokens=estimate.output_tokens,
                 input_tokens=response.input_tokens,
                 cached_input_tokens=response.cached_input_tokens,
                 output_tokens=response.output_tokens,
+                latency_ms=response.latency_ms,
+                estimated_cost=(
+                    priced_estimate.amount_text
+                    if priced_estimate is not None
+                    else estimate.estimated_cost
+                ),
+                actual_cost=actual_cost.amount_text if actual_cost is not None else None,
+                currency=(
+                    applied_pricing.currency if applied_pricing is not None else None
+                ),
+                pricing_id=(
+                    applied_pricing.pricing_id if applied_pricing is not None else None
+                ),
             )
-            if self._finops is not None
-            else None
-        )
-        applied_pricing = actual_cost or priced_estimate or precall_cost
-        usage = LLMUsageEvent(
-            tenant_id=tenant_id,
-            provider_id=provider_id,
-            model_id=response.model_id,
-            purpose=request.purpose,
-            estimated_input_tokens=estimate.input_tokens,
-            estimated_output_tokens=estimate.output_tokens,
-            input_tokens=response.input_tokens,
-            cached_input_tokens=response.cached_input_tokens,
-            output_tokens=response.output_tokens,
-            latency_ms=response.latency_ms,
-            estimated_cost=(
-                priced_estimate.amount_text
-                if priced_estimate is not None
-                else estimate.estimated_cost
-            ),
-            actual_cost=actual_cost.amount_text if actual_cost is not None else None,
-            currency=(
-                applied_pricing.currency if applied_pricing is not None else None
-            ),
-            pricing_id=(
-                applied_pricing.pricing_id if applied_pricing is not None else None
-            ),
-        )
-        self._usage_recorder.record_llm_usage(usage)
-        return LLMGatewayResult(
-            response=response,
-            estimate=estimate,
-            policy_decision=decision,
-            included_content_ids=frozenset(item.id for item in included),
-            usage=usage,
-        )
+            if reservation is not None and self._finops is not None:
+                usage = replace(usage, created_at=reservation.created_at)
+                self._finops.settle(reservation, usage)
+            else:
+                self._usage_recorder.record_llm_usage(usage)
+            return LLMGatewayResult(
+                response=response,
+                estimate=estimate,
+                policy_decision=decision,
+                included_content_ids=frozenset(item.id for item in included),
+                usage=usage,
+            )
+        except BaseException as error:
+            if reservation is not None and self._finops is not None:
+                if provider_dispatched:
+                    self._finops.uncertain(reservation)
+                else:
+                    self._finops.release_undispatched(reservation)
+            if isinstance(error, LLMBudgetUnavailableError):
+                raise LLMBudgetExceededError(str(error)) from error
+            if isinstance(error, LLMGatewayError) or not isinstance(error, Exception):
+                raise
+            raise LLMProviderCallError(f"LLM provider {provider_id} failed") from error
 
     def preflight_structured(
         self,

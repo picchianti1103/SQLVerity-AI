@@ -187,7 +187,7 @@ class SQLGenerationTests(unittest.TestCase):
         self.assertFalse(result.ready_for_execution)
         self.assertTrue(result.validation.accepted)
         self.assertEqual(
-            "SELECT id FROM public.orders LIMIT 500",
+            'SELECT "orders"."id" FROM "public"."orders" LIMIT 500',
             result.validation.normalized_sql,
         )
         self.assertEqual(("public.orders",), result.proposal.tables)
@@ -375,7 +375,8 @@ class SQLGenerationTests(unittest.TestCase):
         self.assertEqual(10, result.interpretation.requested_row_limit)
         self.assertEqual("network.routes", result.interpretation.entities[0].object_ref)
         self.assertEqual(
-            "SELECT id, code, display_name, description FROM network.routes LIMIT 10",
+            'SELECT "routes"."id", "routes"."code", "routes"."display_name", '
+            '"routes"."description" FROM "network"."routes" LIMIT 10',
             result.validation.normalized_sql,
         )
         request_input = provider.requests[0]["input"]

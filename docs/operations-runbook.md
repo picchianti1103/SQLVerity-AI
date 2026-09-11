@@ -45,9 +45,9 @@ application latency.
 ## Throttling
 
 Identify whether user, tenant, or DataSource limits are saturated from the structured quota
-logs and audit trail. A process crash can orphan an in-memory request, so concurrency counters are
-reset when the next configured request window begins; a late release from the old window cannot
-decrement the new counter. Repeated saturation within one window is real load, not a stale lease.
+responses. A process crash can orphan a request lease until its TTL expires. Changing rate windows
+does not release active requests; late or repeated releases affect only their original lease ID.
+Check lease renewal and expiry alongside traffic before diagnosing persistent concurrency saturation.
 Increase limits only after confirming database and provider capacity.
 
 ## Background worker
@@ -72,3 +72,35 @@ Export tenant audit events through `/v1/tenants/{tenant_id}/audit/export` with a
 role and send the response directly to immutable object storage. Exports intentionally avoid
 credentials, prompt bodies, SQL text, and result data. Preserve correlated infrastructure logs
 under the organization retention policy and follow the security contact in `SECURITY.md`.
+
+## Request leases and uncertain LLM charges
+
+`SQLVERITY_REQUEST_LEASE_SECONDS` defaults to 120 (allowed 3–3600). API replicas renew a
+request's user, tenant, and DataSource leases every third of that duration until the complete
+ASGI response finishes. Rate-window rollover does not free capacity. A crashed worker's lease
+expires; late and duplicate releases cannot affect a replacement request. Keep clocks synchronized
+and select a TTL with margin for catalog latency and event-loop stalls. Renewal failure stops the
+HTTP operation (503 before headers; interruption after headers). Cancellation is cooperative and
+cannot undo an external operation already accepted by a database or provider; their timeouts remain
+necessary. Expired leases are cleaned during acquisition and cascade with old inactive quota windows
+through operational retention.
+
+LLM budget reservations have no automatic expiry: a provider timeout can still incur a charge.
+With a principal permitted to manage FinOps, inspect
+`GET /v1/tenants/{tenant_id}/finops/reservations`. The summary exposes `reserved_cost`,
+`uncertain_cost` (a subset of reserved), and `reconciled_cost` (included in total cost).
+Available budget subtracts both recorded and reserved amounts in the reservation's UTC month.
+
+For an uncertain response, confirm final billing with the provider. For an abandoned `reserved`
+or `in_flight` record, stop/confirm termination of its worker first; reconciliation permits those
+states only after one hour without an update. Then call
+`POST /v1/tenants/{tenant_id}/finops/reservations/{reservation_id}/reconcile` with, for example:
+
+```json
+{"actual_cost": "0.0012", "reason": "Provider invoice/request reference confirms final charge"}
+```
+
+Use zero only with evidence of no charge. The amount uses the reservation currency; the server
+records the authenticated actor, reason, and amount in audit. Repeated or live-state reconciliation
+returns 409, and another tenant's reservation returns 404. Charges confirmed above the estimate are
+recorded in full and reduce future capacity; an estimate is not a guarantee of the provider invoice.

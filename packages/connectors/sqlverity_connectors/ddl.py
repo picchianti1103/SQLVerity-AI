@@ -13,6 +13,7 @@ from packages.domain.sqlverity_domain.contracts import (
     SchemaObjectSnapshot,
 )
 from packages.domain.sqlverity_domain.models import ObjectKind
+from packages.sql_engine.sqlverity_sql_engine.identifiers import normalize_identifiers
 
 
 class DDLParseError(ValueError):
@@ -72,6 +73,8 @@ class DialectDDLParser:
         comments: list[exp.Comment] = []
 
         for statement in statements:
+            if statement is not None:
+                normalize_identifiers(statement, self._sqlglot_name)
             if isinstance(statement, exp.Comment):
                 comments.append(statement)
                 continue

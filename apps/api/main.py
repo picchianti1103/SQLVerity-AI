@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 import secrets
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import ExitStack, asynccontextmanager
 from datetime import datetime
 from decimal import Decimal
@@ -16,6 +16,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.openapi.utils import get_openapi
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
+from starlette.concurrency import run_in_threadpool
 from starlette.middleware.base import RequestResponseEndpoint
 from starlette.responses import (
     FileResponse,
@@ -24,6 +25,7 @@ from starlette.responses import (
     RedirectResponse,
     Response,
 )
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from packages.authorized_query.sqlverity_authorized_query import (
     AuthorizedQueryConfigurationError,
@@ -110,6 +112,10 @@ from packages.connectors.sqlverity_connectors.postgresql_executor import (
 from packages.connectors.sqlverity_connectors.sqlserver import SQLServerConnector
 from packages.connectors.sqlverity_connectors.sqlserver_executor import SQLServerReadOnlyExecutor
 from packages.cost_engine.sqlverity_cost_engine import FinOpsService, FinOpsSummary
+from packages.domain.sqlverity_domain.budget import (
+    LLMBudgetReservation,
+    LLMBudgetReservationConflictError,
+)
 from packages.domain.sqlverity_domain.contracts import (
     ColumnSnapshot,
     DataSourceSnapshot,
@@ -244,6 +250,8 @@ from packages.security.sqlverity_security import (
     load_oidc_authenticator_from_environment,
     load_oidc_browser_flow_from_environment,
 )
+from packages.security.sqlverity_security.quota import RequestQuotaLeaseLostError
+from packages.security.sqlverity_security.service import SessionDiscovery
 from packages.sql_engine.sqlverity_sql_engine import (
     DEFAULT_DIALECT_REGISTRY,
     SQLValidatorRegistry,
@@ -447,12 +455,39 @@ class FinOpsSummaryView(BaseModel):
     period_start: datetime
     period_end: datetime
     total_cost: Decimal
+    reserved_cost: Decimal
+    uncertain_cost: Decimal
+    reconciled_cost: Decimal
     budget_id: str | None
     budget_amount: Decimal | None
     remaining_amount: Decimal | None
     priced_event_count: int
     unpriced_event_count: int
     breakdown: tuple[UsageBreakdownView, ...]
+
+
+class LLMBudgetReservationView(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    tenant_id: str
+    provider_id: str
+    model_id: str
+    pricing_id: str
+    currency: str
+    amount: Decimal
+    period_start: datetime
+    period_end: datetime
+    state: str
+    actual_cost: Decimal | None
+    usage_event_id: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class BudgetReconciliationRequest(BaseModel):
+    actual_cost: Decimal = Field(ge=0, allow_inf_nan=False)
+    reason: str = Field(min_length=1, max_length=2000)
 
 
 class ExecutionCostPolicyUpsert(BaseModel):
@@ -469,6 +504,7 @@ class ExecutionCostPolicyView(BaseModel):
     max_total_cost: float | None
     max_estimated_rows: int | None
     require_explain: bool
+    revision: int
     updated_at: datetime
 
 
@@ -588,6 +624,40 @@ class DataSourceView(BaseModel):
     source_type: DataSourceType
     dialect: str
     capabilities: frozenset[DataSourceCapability]
+
+
+class SessionPrincipalView(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    display_name: str
+    tenant_id: str | None
+    authentication_method: str
+    mfa_verified: bool
+
+
+class DiscoveredSourceView(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    source: DataSourceView
+    permissions: tuple[SecurityPermission, ...]
+
+
+class DiscoveredTenantView(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    name: str
+    permissions: tuple[SecurityPermission, ...]
+    data_sources: tuple[DiscoveredSourceView, ...]
+
+
+class SessionDiscoveryView(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    principal: SessionPrincipalView
+    platform_permissions: tuple[SecurityPermission, ...]
+    tenants: tuple[DiscoveredTenantView, ...]
 
 
 class IngestionView(BaseModel):
@@ -1736,6 +1806,8 @@ class QueryParameterBindings(BaseModel):
 class QueryApprovalCreate(QueryParameterBindings):
     model_config = ConfigDict(extra="forbid")
 
+    expected_explain_revision: int = Field(default=0, ge=0)
+
 
 class QueryRequestStateView(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -1747,6 +1819,9 @@ class QueryRequestStateView(BaseModel):
     parameter_names: tuple[str, ...]
     parameter_definitions: tuple[QueryParameterDefinitionView, ...]
     updated_at: datetime
+    explain_revision: int
+    approved_explain_revision: int | None
+    approved_cost_policy_revision: int | None
 
 
 class ExplainResultView(BaseModel):
@@ -1756,6 +1831,7 @@ class ExplainResultView(BaseModel):
     estimated_total_cost: float | None
     estimated_rows: int | None
     elapsed_ms: int
+    revision: int | None
 
 
 class ReadOnlyResultView(BaseModel):
@@ -1922,6 +1998,9 @@ def _provider_deployment_metadata(
 
 def _request_quota_limits() -> RequestQuotaLimits:
     return RequestQuotaLimits(
+        lease_seconds=_bounded_environment_integer(
+            "SQLVERITY_REQUEST_LEASE_SECONDS", default=120, minimum=3, maximum=3_600,
+        ),
         window_seconds=_bounded_environment_integer(
             "SQLVERITY_RATE_WINDOW_SECONDS",
             default=60,
@@ -2297,13 +2376,13 @@ async def observe_api_request(
         )
 
 
-@app.middleware("http")
 async def authenticate_api_request(
     request: Request,
-    call_next: RequestResponseEndpoint,
-) -> Response:
+    call_next: Callable[[Request], Awaitable[None]],
+) -> Response | None:
     if not request.url.path.startswith("/v1/"):
-        return await call_next(request)
+        await call_next(request)
+        return None
     security = cast(AuthenticationService, request.app.state.security)
     quota_lease: RequestQuotaLease | None = None
     try:
@@ -2344,7 +2423,8 @@ async def authenticate_api_request(
             tenant_id = None
             data_source_id = None
         quota_manager = cast(RequestQuotaManager, request.app.state.request_quotas)
-        quota = quota_manager.acquire(
+        quota = await run_in_threadpool(
+            quota_manager.acquire,
             principal_id=principal.id,
             tenant_id=tenant_id,
             data_source_id=data_source_id,
@@ -2372,13 +2452,42 @@ async def authenticate_api_request(
             status_code=status.HTTP_403_FORBIDDEN,
             content={"detail": str(error)},
         )
+    if quota_lease is None:
+        raise RuntimeError("Allowed request quota has no lease")
     try:
-        return await call_next(request)
-    finally:
-        if quota_lease is not None:
-            cast(RequestQuotaManager, request.app.state.request_quotas).release(
-                quota_lease
-            )
+        await quota_manager.run_with_lease(quota_lease, lambda: call_next(request))
+    except RequestQuotaLeaseLostError as error:
+        return JSONResponse(status_code=503, content={"detail": str(error)})
+    return None
+
+
+class AuthenticatedRequestMiddleware:
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        response_started = False
+
+        async def tracked_send(message: Message) -> None:
+            nonlocal response_started
+            if message["type"] == "http.response.start":
+                response_started = True
+            await send(message)
+
+        async def call_app(request: Request) -> None:
+            await self.app(scope, receive, tracked_send)
+
+        response = await authenticate_api_request(Request(scope, receive), call_app)
+        if response is not None:
+            if response_started:
+                raise RequestQuotaLeaseLostError("Response interrupted after request lease loss")
+            await response(scope, receive, send)
+
+
+app.add_middleware(AuthenticatedRequestMiddleware)
 
 
 def get_catalog(request: Request) -> SQLiteCatalogRepository:
@@ -2789,6 +2898,14 @@ def create_tenant(
     return catalog.create_tenant(payload.name)
 
 
+@app.get("/v1/session", response_model=SessionDiscoveryView)
+def discover_session(
+    security: SecurityDependency,
+    principal: Annotated[AuthenticatedPrincipal, Depends(get_authenticated_principal)],
+) -> SessionDiscovery:
+    return security.discover_session(principal)
+
+
 @app.get("/v1/tenants", response_model=tuple[TenantView, ...])
 def list_tenants(
     catalog: CatalogDependency,
@@ -3029,6 +3146,39 @@ def list_tenant_budgets(
     if catalog.get_tenant(tenant_id) is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tenant not found")
     return catalog.list_tenant_budgets(tenant_id)
+
+
+@app.get(
+    "/v1/tenants/{tenant_id}/finops/reservations",
+    response_model=tuple[LLMBudgetReservationView, ...],
+)
+def list_budget_reservations(
+    tenant_id: str, catalog: CatalogDependency, _actor: FinOpsManagerDependency,
+) -> tuple[LLMBudgetReservation, ...]:
+    if catalog.get_tenant(tenant_id) is None:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    return catalog.list_llm_budget_reservations(tenant_id)
+
+
+@app.post(
+    "/v1/tenants/{tenant_id}/finops/reservations/{reservation_id}/reconcile",
+    response_model=LLMBudgetReservationView,
+)
+def reconcile_budget_reservation(
+    tenant_id: str, reservation_id: str, payload: BudgetReconciliationRequest,
+    catalog: CatalogDependency, actor: FinOpsManagerDependency,
+) -> LLMBudgetReservation:
+    try:
+        return catalog.reconcile_llm_budget_reservation(
+            tenant_id, reservation_id, actual_cost=payload.actual_cost,
+            actor_id=actor.id, reason=payload.reason,
+        )
+    except LookupError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except LLMBudgetReservationConflictError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
 
 
 @app.get(
@@ -4857,6 +5007,20 @@ def correct_intent_memory_from_text(
         ) from error
 
 
+@app.get(
+    "/v1/tenants/{tenant_id}/data-sources/{data_source_id}/query-requests/{request_id}",
+    response_model=QueryRequestStateView,
+)
+def get_query_request_state(
+    tenant_id: str, data_source_id: str, request_id: str,
+    catalog: CatalogDependency, _actor: QueryUserDependency,
+) -> QueryRequest:
+    query_request = catalog.get_query_request(tenant_id, request_id)
+    if query_request is None or query_request.data_source_id != data_source_id:
+        raise HTTPException(status_code=404, detail="Query request not found")
+    return query_request
+
+
 @app.post(
     (
         "/v1/tenants/{tenant_id}/data-sources/{data_source_id}/"
@@ -4927,6 +5091,7 @@ def approve_query_request(
             request_id=request_id,
             actor_id=actor.actor_id,
             parameters=payload.parameters,
+            expected_explain_revision=payload.expected_explain_revision,
         )
     except QueryExecutionNotFoundError as error:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error
