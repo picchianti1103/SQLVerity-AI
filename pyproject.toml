@@ -96,7 +96,7 @@ dev = [
   "pytest",
   "playwright>=1.62,<2",
   "ruff",
-  "twine>=6,<7",
+  "twine>=6,<8",
 ]
 
 [tool.setuptools.packages.find]
