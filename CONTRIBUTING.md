@@ -25,6 +25,11 @@ connector support remains in the codebase, but its installation extra is tempora
 the upstream Python distribution has a release that resolves `PYSEC-2026-217`. Claude, Gemini, Kimi,
 and Ollama use the core HTTP client and do not require provider SDK extras.
 
+The OpenAI adapter currently supports SDK 2.x (`openai>=2,<3`) with `httpx`. Dependabot explicitly
+ignores SDK 3 and later until a reviewed transport migration is implemented. An SDK 3 update also
+requires HTTPX2-compatible mock clients and runtime verification; suppressing a client mismatch
+with `cast(Any, ...)` does not make the transports compatible.
+
 ## Verification gate
 
 Run all checks before opening a pull request:
