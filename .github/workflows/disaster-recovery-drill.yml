@@ -80,7 +80,7 @@ jobs:
           --backup "${{ runner.temp }}/catalog.dump"
           --target-secret-ref env://SQLVERITY_DRILL_DB
           | tee "${{ runner.temp }}/drill-report.json"
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: disaster-recovery-drill-report
           path: ${{ runner.temp }}/drill-report.json
