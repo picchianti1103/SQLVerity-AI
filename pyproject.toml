@@ -44,7 +44,7 @@ postgres = [
   "psycopg-pool>=3,<4",
 ]
 mysql = [
-  "mysql-connector-python>=9.2,<10",
+  "mysql-connector-python>=9.2,<27",
 ]
 oracle = [
   "oracledb>=4,<5",
@@ -69,7 +69,7 @@ observability = [
 all = [
   "boto3>=1.40,<2",
   "mssql-python>=1.11,<2",
-  "mysql-connector-python>=9.2,<10",
+  "mysql-connector-python>=9.2,<27",
   "openai>=2,<3",
   "opentelemetry-api>=1.30,<2",
   "opentelemetry-exporter-otlp-proto-http>=1.30,<2",
@@ -83,7 +83,7 @@ dev = [
   "boto3>=1.40,<2",
   "build>=1,<2",
   "mypy",
-  "mysql-connector-python>=9.2,<10",
+  "mysql-connector-python>=9.2,<27",
   "openai>=2,<3",
   "opentelemetry-api>=1.30,<2",
   "opentelemetry-exporter-otlp-proto-http>=1.30,<2",
