@@ -55,7 +55,7 @@ class LearningLoopTests(unittest.TestCase):
         self.assertEqual(entry.example.revision, 1)
         self.assertEqual(
             entry.example.normalized_sql,
-            "SELECT id, total_amount FROM public.orders LIMIT 500",
+            'SELECT "orders"."id", "orders"."total_amount" FROM "public"."orders" LIMIT 500',
         )
         self.assertEqual(entry.example.referenced_tables, ("public.orders",))
         self.assertEqual(

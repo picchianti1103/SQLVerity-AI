@@ -6,7 +6,7 @@ boundaries while keeping behavior testable and explicit.
 
 ## Development setup
 
-SQLVerity AI requires Python 3.12 or newer.
+SQLVerity AI requires Python 3.12 or newer. Console regression tests also require Node 22 or newer.
 
 ```bash
 python -m venv .venv
@@ -33,12 +33,17 @@ Run all checks before opening a pull request:
 python -m ruff check apps packages tests
 python -m mypy apps packages tests --no-incremental
 python -m pytest -q -p no:cacheprovider
+node --test tests/web/console.test.cjs
 python -m pip_audit .
 python -m packages.evaluation.sqlverity_evaluation.cli \
   --dataset fixtures/questions/golden_v1.json \
   --thresholds fixtures/questions/golden_thresholds_v1.json \
   --baseline fixtures/questions/golden_baseline_v1.json
 ```
+
+CI additionally runs the opt-in console browser suite with Chromium. See
+[browser regression setup](docs/live-certification.md#console-browser-regressions) for local
+Playwright installation and execution instructions.
 
 ## Design expectations
 

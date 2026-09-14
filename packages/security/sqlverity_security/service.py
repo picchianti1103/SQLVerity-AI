@@ -16,6 +16,7 @@ from packages.catalog.sqlverity_catalog.repository import (
 from packages.domain.sqlverity_domain.models import (
     APICredential,
     APICredentialRevocation,
+    DataSource,
     DataSourceRoleAssignment,
     PlatformRole,
     SecurityPrincipal,
@@ -101,6 +102,27 @@ class CredentialMetadata:
     expires_at: datetime | None
     created_at: datetime
     revoked: bool
+
+
+@dataclass(frozen=True, slots=True)
+class DiscoveredSource:
+    source: DataSource
+    permissions: tuple[SecurityPermission, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class DiscoveredTenant:
+    id: str
+    name: str
+    permissions: tuple[SecurityPermission, ...]
+    data_sources: tuple[DiscoveredSource, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class SessionDiscovery:
+    principal: AuthenticatedPrincipal
+    platform_permissions: tuple[SecurityPermission, ...]
+    tenants: tuple[DiscoveredTenant, ...]
 
 
 class AuthenticationService:
@@ -220,6 +242,45 @@ class AuthenticationService:
             raise AuthorizationError(
                 f"Principal lacks {permission.value} permission for {scope}"
             )
+
+    def discover_session(self, principal: AuthenticatedPrincipal) -> SessionDiscovery:
+        """Discover only the principal's tenant and readable sources; do not grant new roles."""
+        if principal.is_bootstrap:
+            tenants = self._repository.list_tenants()
+        else:
+            tenant = self._repository.get_tenant(principal.tenant_id or "")
+            tenants = (tenant,) if tenant is not None else ()
+        discovered: list[DiscoveredTenant] = []
+        for tenant in tenants:
+            tenant_roles = {
+                assignment.role for assignment in self._repository.list_tenant_role_assignments(
+                    tenant.id, principal.id,
+                )
+            } if not principal.is_bootstrap else set()
+            source_roles: dict[str, set[PlatformRole]] = defaultdict(set)
+            if not principal.is_bootstrap:
+                for assignment in self._repository.list_data_source_role_assignments(
+                    tenant.id, principal_id=principal.id,
+                ):
+                    source_roles[assignment.data_source_id].add(assignment.role)
+
+            def permissions(roles: set[PlatformRole]) -> tuple[SecurityPermission, ...]:
+                return tuple(permission for permission in SecurityPermission
+                             if principal.is_bootstrap or roles & _PERMISSION_ROLES[permission])
+
+            sources = tuple(
+                DiscoveredSource(source, permissions(tenant_roles | source_roles[source.id]))
+                for source in self._repository.list_data_sources(tenant.id)
+                if principal.is_bootstrap or tenant_roles or source_roles[source.id]
+            )
+            if principal.is_bootstrap or tenant_roles or sources:
+                discovered.append(DiscoveredTenant(
+                    tenant.id, tenant.name, permissions(tenant_roles), sources,
+                ))
+        return SessionDiscovery(
+            principal, (SecurityPermission.PLATFORM_MANAGE,) if principal.is_bootstrap else (),
+            tuple(discovered),
+        )
 
     def provision_principal(
         self,

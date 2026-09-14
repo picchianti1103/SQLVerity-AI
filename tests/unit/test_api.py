@@ -643,9 +643,12 @@ class APITests(unittest.TestCase):
                     premature = client.post(f"{request_path}/executions")
                     self.assertEqual(409, premature.status_code, premature.text)
 
+                    stale_approval = client.post(f"{request_path}/approval", json={})
+                    self.assertEqual(409, stale_approval.status_code, stale_approval.text)
+
                     approved = client.post(
                         f"{request_path}/approval",
-                        json={},
+                        json={"expected_explain_revision": explained.json()["revision"]},
                     )
                     self.assertEqual(200, approved.status_code, approved.text)
                     self.assertEqual("approved", approved.json()["state"])
@@ -940,7 +943,9 @@ class APITests(unittest.TestCase):
                     self.assertEqual(200, explained.status_code, explained.text)
                     approved = client.post(
                         f"{request_path}/approval",
-                        json=bindings,
+                        json={
+                            **bindings, "expected_explain_revision": explained.json()["revision"],
+                        },
                     )
                     self.assertEqual(200, approved.status_code, approved.text)
                     self.assertEqual(["start_date"], approved.json()["parameter_names"])

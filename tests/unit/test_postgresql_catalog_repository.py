@@ -53,9 +53,9 @@ class PostgreSQLCatalogRepositoryAdapterTests(unittest.TestCase):
     def test_all_packaged_migrations_are_discovered_and_outer_transaction_removed(self) -> None:
         migrations = _postgresql_migration_files()
 
-        self.assertEqual(16, len(migrations))
+        self.assertEqual(18, len(migrations))
         self.assertEqual("0001_catalog.sql", migrations[0].name)
-        self.assertEqual("0016_privacy_first_ai_egress.sql", migrations[-1].name)
+        self.assertEqual("0018_budget_leases_and_execution_policy.sql", migrations[-1].name)
         body = _migration_body("BEGIN;\nSELECT 1;\nCOMMIT;\n")
         self.assertEqual("\nSELECT 1;\n", body)
 

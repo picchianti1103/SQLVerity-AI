@@ -191,6 +191,9 @@ class CatalogRepositoryTests(unittest.TestCase):
             query_request.id,
             QueryRequestState.APPROVED,
             actor_id="reviewer-1",
+            expected_explain_revision=0,
+            expected_cost_policy_revision=0,
+            approval_sql_hash="a" * 64,
         )
 
         self.assertEqual(QueryRequestState.APPROVED, approved.state)

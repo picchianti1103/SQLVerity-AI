@@ -133,9 +133,10 @@ class PostgreSQLReadOnlyExecutorTests(unittest.TestCase):
         self.assertEqual(12, result.estimated_rows)
         statements = self.factory.connection.cursor_instance.statements
         self.assertEqual("SET TRANSACTION READ ONLY", statements[0][0])
-        self.assertEqual(("15000ms",), statements[1][1])
-        self.assertTrue(statements[2][0].startswith("EXPLAIN (FORMAT JSON"))
-        self.assertNotIn("ANALYZE", statements[2][0])
+        self.assertEqual("SET LOCAL search_path = pg_catalog, pg_temp", statements[1][0])
+        self.assertEqual(("15000ms",), statements[2][1])
+        self.assertTrue(statements[3][0].startswith("EXPLAIN (FORMAT JSON"))
+        self.assertNotIn("ANALYZE", statements[3][0])
         assert self.factory.kwargs is not None
         self.assertEqual("sqlverity-read-only-executor", self.factory.kwargs["application_name"])
 

@@ -16,6 +16,25 @@ class OperationalRetentionTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.repository.close()
 
+    def test_retention_removes_expired_leases_but_keeps_live_requests(self) -> None:
+        now = datetime.now(UTC)
+        old = now - timedelta(days=90)
+        for scope, expiry in (("expired", old + timedelta(seconds=120)),
+                              ("live", now + timedelta(seconds=120))):
+            self.repository.try_acquire_request_quota(
+                scope_key=scope, window_number=1, max_requests=10, max_concurrent=1,
+                updated_at=old, lease_id=scope, expires_at=expiry,
+            )
+        cutoff = now - timedelta(days=30)
+        self.assertEqual(1, self.repository.preview_operational_retention(cutoff).quota_windows)
+        self.assertEqual(1, self.repository.purge_operational_records(
+            cutoff, actor_id="operator",
+        ).quota_windows)
+        rows = self.repository._connection.execute(
+            "SELECT lease_id FROM request_concurrency_leases",
+        ).fetchall()
+        self.assertEqual(["live"], [row["lease_id"] for row in rows])
+
     def test_preview_then_purge_only_terminal_and_inactive_records(self) -> None:
         old = datetime.now(UTC) - timedelta(days=90)
         cutoff = datetime.now(UTC) - timedelta(days=30)
@@ -65,9 +84,9 @@ class OperationalRetentionTests(unittest.TestCase):
             window_number=1,
             max_requests=10,
             max_concurrent=2,
-            updated_at=old,
+            updated_at=old, lease_id="old-lease", expires_at=old + timedelta(seconds=120),
         )
-        self.repository.release_request_quota("old-window", 1, old)
+        self.repository.release_request_quota("old-window", "old-lease", old)
 
         preview = self.repository.preview_operational_retention(cutoff)
         report = self.repository.purge_operational_records(

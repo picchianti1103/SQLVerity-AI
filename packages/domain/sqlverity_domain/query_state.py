@@ -9,6 +9,14 @@ class InvalidStateTransition(ValueError):
     pass
 
 
+class QueryRequestConflictError(RuntimeError):
+    """A query changed after the caller read the revision it intended to use."""
+
+
+class QueryCostPolicyChangedError(QueryRequestConflictError):
+    """Approval no longer refers to the current execution cost policy."""
+
+
 _ALLOWED_TRANSITIONS: dict[QueryRequestState, frozenset[QueryRequestState]] = {
     QueryRequestState.RECEIVED: frozenset(
         {
@@ -44,7 +52,8 @@ _ALLOWED_TRANSITIONS: dict[QueryRequestState, frozenset[QueryRequestState]] = {
         {QueryRequestState.APPROVED, QueryRequestState.CANCELLED}
     ),
     QueryRequestState.APPROVED: frozenset(
-        {QueryRequestState.EXECUTING, QueryRequestState.CANCELLED}
+        {QueryRequestState.EXECUTING, QueryRequestState.CANCELLED,
+         QueryRequestState.READY_FOR_PREVIEW}
     ),
     QueryRequestState.EXECUTING: frozenset(
         {

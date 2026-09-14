@@ -40,6 +40,20 @@ that one replica can consume its confirmation while a second replica rejects rep
 shared catalog. Only then roll out the remaining replicas. A failed migration prevents readiness;
 do not bypass it by inserting or deleting migration-ledger rows.
 
+Migration `0017` adds immutable EXPLAIN revisions and independent approval digests. Drain all old
+replicas before allowing the new version to write tickets. Old approved tickets cannot execute;
+regenerate and approve them again. Preview tickets need a fresh EXPLAIN, and approval API clients
+must echo its `revision` as `expected_explain_revision`. See the
+[September remediation notes](review-remediation-2026-09.md) for compatibility details.
+
+Migration `0018` adds durable LLM budget reservations, independent request leases, and execution
+cost policy revisions. Drain API and worker replicas before upgrading: mixed old/new binaries do
+not share the same budget or concurrency accounting. SQLite adds the equivalent tables and columns
+on initialization. Existing policies start at revision 1; a missing policy is revision 0. Tickets
+without the new policy binding must be reviewed and approved again (tickets also missing the SQL
+binding from `0017` must be regenerated). Do not restore old accounting state after billable work
+without reconciling charges that occurred after the backup.
+
 ## Application rollback
 
 If the old application was explicitly verified as compatible with the migrated schema, drain the new

@@ -255,6 +255,7 @@ CREATE TABLE IF NOT EXISTS execution_cost_policies (
     data_source_id TEXT NOT NULL,
     max_total_cost REAL,
     max_estimated_rows INTEGER,
+    revision INTEGER NOT NULL DEFAULT 1,
     require_explain INTEGER NOT NULL CHECK (require_explain IN (0, 1)),
     updated_at TEXT NOT NULL,
     UNIQUE (tenant_id, data_source_id),
@@ -443,6 +444,12 @@ CREATE TABLE IF NOT EXISTS query_requests (
     parameter_definitions_json TEXT NOT NULL DEFAULT '[]',
     parameter_names_json TEXT NOT NULL DEFAULT '[]',
     parameter_value_hash TEXT,
+    explain_revision INTEGER NOT NULL DEFAULT 0,
+    explained_sql_hash TEXT,
+    approved_explain_revision INTEGER,
+    approved_cost_policy_revision INTEGER,
+    approved_sql_hash TEXT,
+    approved_parameter_value_hash TEXT,
     output_lineage_json TEXT NOT NULL DEFAULT '[]',
     output_lineage_complete INTEGER NOT NULL DEFAULT 0,
     approved_by TEXT,
@@ -878,3 +885,52 @@ CREATE INDEX IF NOT EXISTS tenant_role_assignments_lookup_idx
     ON tenant_role_assignments (tenant_id, principal_id, role);
 CREATE INDEX IF NOT EXISTS data_source_role_assignments_lookup_idx
     ON data_source_role_assignments (tenant_id, data_source_id, principal_id, role);
+
+CREATE TABLE IF NOT EXISTS query_explain_revisions (
+    tenant_id TEXT NOT NULL,
+    request_id TEXT NOT NULL,
+    revision INTEGER NOT NULL CHECK (revision > 0),
+    sql_hash TEXT NOT NULL,
+    parameter_value_hash TEXT,
+    parameter_names_json TEXT NOT NULL,
+    estimated_db_cost REAL,
+    estimated_db_rows INTEGER,
+    elapsed_ms INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, request_id, revision),
+    FOREIGN KEY (tenant_id, request_id) REFERENCES query_requests(tenant_id, id)
+);
+
+CREATE TRIGGER IF NOT EXISTS query_explain_revisions_no_update
+BEFORE UPDATE ON query_explain_revisions
+BEGIN
+    SELECT RAISE(ABORT, 'query_explain_revisions are immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS query_explain_revisions_no_delete
+BEFORE DELETE ON query_explain_revisions
+BEGIN
+    SELECT RAISE(ABORT, 'query_explain_revisions are immutable');
+END;
+
+CREATE TABLE IF NOT EXISTS llm_budget_accounts (
+    tenant_id TEXT NOT NULL REFERENCES tenants(id), currency TEXT NOT NULL,
+    revision INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (tenant_id, currency)
+);
+CREATE TABLE IF NOT EXISTS llm_budget_reservations (
+    id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES tenants(id),
+    provider_id TEXT NOT NULL, model_id TEXT NOT NULL, pricing_id TEXT NOT NULL REFERENCES model_pricing(id),
+    currency TEXT NOT NULL, amount TEXT NOT NULL, period_start TEXT NOT NULL, period_end TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('reserved', 'in_flight', 'uncertain', 'settled', 'released')),
+    actual_cost TEXT, usage_event_id TEXT UNIQUE REFERENCES llm_usage_events(id) DEFERRABLE INITIALLY DEFERRED,
+    created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS llm_budget_reservations_scope_idx
+    ON llm_budget_reservations(tenant_id, currency, period_start, state);
+CREATE TABLE IF NOT EXISTS request_concurrency_leases (
+    scope_key TEXT NOT NULL REFERENCES request_quota_windows(scope_key) ON DELETE CASCADE,
+    lease_id TEXT NOT NULL, expires_at TEXT NOT NULL,
+    PRIMARY KEY (scope_key, lease_id)
+);
+CREATE INDEX IF NOT EXISTS request_concurrency_leases_expiry_idx
+    ON request_concurrency_leases(scope_key, expires_at);

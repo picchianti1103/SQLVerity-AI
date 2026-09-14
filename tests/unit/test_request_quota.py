@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import unittest
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from packages.catalog.sqlverity_catalog.repository import SQLiteCatalogRepository
 from packages.security.sqlverity_security import (
@@ -25,7 +25,8 @@ class RequestQuotaTests(unittest.TestCase):
                 data_source=ScopeQuota(requests_per_window=10, max_concurrent=5),
             ),
             epoch_clock=lambda: self.now,
-            utc_clock=lambda: datetime(2026, 8, 22, 10, 0, tzinfo=UTC),
+            utc_clock=lambda: datetime(2026, 8, 22, 10, 0, tzinfo=UTC)
+            + timedelta(seconds=self.now),
         )
 
     def tearDown(self) -> None:
@@ -85,14 +86,14 @@ class RequestQuotaTests(unittest.TestCase):
         assert reset.lease is not None
         self.manager.release(reset.lease)
 
-    def test_new_window_recovers_crashed_lease_and_ignores_late_release(self) -> None:
+    def test_expiry_recovers_crashed_lease_and_ignores_late_release(self) -> None:
         crashed = self.manager.acquire(
             principal_id="user-1",
             tenant_id=None,
             data_source_id=None,
         )
         assert crashed.lease is not None
-        self.now = 180.0
+        self.now = 240.0
 
         recovered = self.manager.acquire(
             principal_id="user-1",

@@ -22,6 +22,28 @@ from packages.result_engine.sqlverity_result_engine import (
 
 
 class DeterministicResultProcessorTests(unittest.TestCase):
+    def test_case_distinct_outputs_preserve_their_own_classification(self) -> None:
+        request = replace(
+            self.query_request,
+            referenced_columns=("public.orders.id", "public.orders.ID"),
+            output_lineage=(
+                OutputColumnLineage(output_name="id", source_columns=("public.orders.id",)),
+                OutputColumnLineage(output_name="ID", source_columns=("public.orders.ID",)),
+            ),
+            output_lineage_complete=True,
+        )
+        processed = self.processor.process(
+            query_request=request, data_source=self.data_source,
+            result=self._result(columns=("id", "ID"), rows=((101, "secret"),)),
+            column_classifications={
+                "public.orders.id": Classification.INTERNAL,
+                "public.orders.ID": Classification.CONFIDENTIAL,
+            },
+            usage=None,
+        )
+        self.assertTrue(processed.privacy.output_lineage_complete)
+        self.assertEqual({"id": 101, "ID": "[REDACTED]"}, processed.result.rows[0])
+
     def setUp(self) -> None:
         self.processor = DeterministicResultProcessor()
         self.data_source = DataSource(

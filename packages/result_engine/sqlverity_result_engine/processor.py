@@ -146,13 +146,13 @@ class DeterministicResultProcessor:
                 column
                 for column in result.columns
                 if _above_visible(
-                    output_classifications[column.casefold()],
+                    output_classifications[column],
                     self._maximum_visible_classification,
                 )
             )
         else:
             masked_columns = result.columns if should_mask else ()
-        masked_column_keys = {column.casefold() for column in masked_columns}
+        masked_column_keys = set(masked_columns)
         safe_rows: tuple[Mapping[str, Any], ...]
         if masked_columns:
             safe_rows = tuple(
@@ -161,7 +161,7 @@ class DeterministicResultProcessor:
                         None
                         if value is None
                         else "[REDACTED]"
-                        if column.casefold() in masked_column_keys
+                        if column in masked_column_keys
                         else value
                     )
                     for column, value in row.items()
@@ -290,10 +290,10 @@ def _output_lineage_complete(
     referenced_columns: tuple[str, ...],
 ) -> bool:
     physical_names = Counter(
-        column_ref.rsplit(".", 1)[-1].casefold()
+        column_ref.rsplit(".", 1)[-1]
         for column_ref in referenced_columns
     )
-    return all(physical_names[column.casefold()] == 1 for column in output_columns)
+    return all(physical_names[column] == 1 for column in output_columns)
 
 
 def _output_classifications(
@@ -303,10 +303,10 @@ def _output_classifications(
 ) -> tuple[dict[str, Classification], bool]:
     if query_request.output_lineage:
         lineage = {
-            item.output_name.casefold(): item
+            item.output_name: item
             for item in query_request.output_lineage
         }
-        output_names = tuple(column.casefold() for column in output_columns)
+        output_names = output_columns
         complete = (
             query_request.output_lineage_complete
             and len(output_names) == len(set(output_names)) == len(lineage)
@@ -316,13 +316,13 @@ def _output_classifications(
             return {}, False
         return (
             {
-                column.casefold(): _maximum_classification(
+                column: _maximum_classification(
                     [
                         column_classifications.get(
                             source_column,
                             Classification.HIGHLY_SENSITIVE,
                         )
-                        for source_column in lineage[column.casefold()].source_columns
+                        for source_column in lineage[column].source_columns
                     ]
                 )
                 for column in output_columns
@@ -337,13 +337,13 @@ def _output_classifications(
     if not complete:
         return {}, False
     physical_by_name = {
-        column_ref.rsplit(".", 1)[-1].casefold(): column_ref
+        column_ref.rsplit(".", 1)[-1]: column_ref
         for column_ref in query_request.referenced_columns
     }
     return (
         {
-            column.casefold(): column_classifications.get(
-                physical_by_name[column.casefold()],
+            column: column_classifications.get(
+                physical_by_name[column],
                 Classification.HIGHLY_SENSITIVE,
             )
             for column in output_columns

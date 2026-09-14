@@ -13,6 +13,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  postgresql:
+    uses: ./.github/workflows/live-certification.yml
+
   verify:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -47,6 +50,22 @@ jobs:
 
       - name: Test
         run: python -m pytest -q -p no:cacheprovider
+
+      - name: Set up Node for console regression tests
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Test deferred console responses
+        run: node --test tests/web/console.test.cjs
+
+      - name: Install Chromium for browser regression tests
+        run: python -m playwright install --with-deps chromium
+
+      - name: Test scoped console access and context changes in Chromium
+        env:
+          SQLVERITY_RUN_BROWSER_TESTS: "true"
+        run: python -m pytest -q tests/browser/test_console_browser.py
 
       - name: Audit core dependencies for known vulnerabilities
         run: python -m pip_audit .

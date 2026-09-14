@@ -1,10 +1,14 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+import asyncio
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from time import time
 from typing import Protocol
+from uuid import uuid4
+
+from starlette.concurrency import run_in_threadpool
 
 from packages.domain.sqlverity_domain.models import utc_now
 
@@ -18,14 +22,24 @@ class RequestQuotaRepository(Protocol):
         max_requests: int,
         max_concurrent: int,
         updated_at: datetime,
+        lease_id: str,
+        expires_at: datetime,
     ) -> tuple[bool, str | None]: ...
 
     def release_request_quota(
         self,
         scope_key: str,
-        window_number: int,
+        lease_id: str,
         updated_at: datetime,
     ) -> None: ...
+
+    def renew_request_quota(
+        self,
+        scope_keys: tuple[str, ...],
+        lease_id: str,
+        now: datetime,
+        expires_at: datetime,
+    ) -> bool: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,8 +58,11 @@ class RequestQuotaLimits:
     user: ScopeQuota
     tenant: ScopeQuota
     data_source: ScopeQuota
+    lease_seconds: int = 120
 
     def __post_init__(self) -> None:
+        if not 3 <= self.lease_seconds <= 3_600:
+            raise ValueError("Request lease duration must be between 3 and 3600 seconds")
         if not 1 <= self.window_seconds <= 3_600:
             raise ValueError("Request quota window must be between 1 and 3600 seconds")
 
@@ -53,7 +70,7 @@ class RequestQuotaLimits:
 @dataclass(frozen=True, slots=True)
 class RequestQuotaLease:
     scope_keys: tuple[str, ...]
-    window_number: int
+    lease_id: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,35 +125,94 @@ class RequestQuotaManager:
                 )
             )
         acquired: list[str] = []
-        for scope_key, quota, scope_name in scopes:
-            allowed, reason = self._repository.try_acquire_request_quota(
-                scope_key=scope_key,
-                window_number=window_number,
-                max_requests=quota.requests_per_window,
-                max_concurrent=quota.max_concurrent,
-                updated_at=self._utc_clock(),
-            )
-            if not allowed:
-                self._release_keys(tuple(reversed(acquired)), window_number)
-                return RequestQuotaDecision(
-                    allowed=False,
-                    denied_scope=scope_name,
-                    reason=reason,
-                    retry_after_seconds=retry_after if reason == "rate" else 1,
+        lease_id = str(uuid4())
+        now = self._utc_clock()
+        try:
+            for scope_key, quota, scope_name in scopes:
+                allowed, reason = self._repository.try_acquire_request_quota(
+                    scope_key=scope_key,
+                    window_number=window_number,
+                    max_requests=quota.requests_per_window,
+                    max_concurrent=quota.max_concurrent,
+                    updated_at=now,
+                    lease_id=lease_id,
+                    expires_at=now + timedelta(seconds=self._limits.lease_seconds),
                 )
-            acquired.append(scope_key)
+                if not allowed:
+                    self._release_keys(tuple(reversed(acquired)), lease_id)
+                    acquired.clear()
+                    return RequestQuotaDecision(
+                        allowed=False,
+                        denied_scope=scope_name,
+                        reason=reason,
+                        retry_after_seconds=retry_after if reason == "rate" else 1,
+                    )
+                acquired.append(scope_key)
+        except BaseException:
+            self._release_keys(tuple(reversed(acquired)), lease_id)
+            raise
         return RequestQuotaDecision(
             allowed=True,
-            lease=RequestQuotaLease(tuple(acquired), window_number),
+            lease=RequestQuotaLease(tuple(acquired), lease_id),
         )
 
     def release(self, lease: RequestQuotaLease) -> None:
-        self._release_keys(tuple(reversed(lease.scope_keys)), lease.window_number)
+        self._release_keys(tuple(reversed(lease.scope_keys)), lease.lease_id)
 
-    def _release_keys(self, scope_keys: tuple[str, ...], window_number: int) -> None:
+    @property
+    def renewal_interval_seconds(self) -> float:
+        return self._limits.lease_seconds / 3
+
+    def renew(self, lease: RequestQuotaLease) -> bool:
+        now = self._utc_clock()
+        return self._repository.renew_request_quota(
+            lease.scope_keys,
+            lease.lease_id,
+            now,
+            now + timedelta(seconds=self._limits.lease_seconds),
+        )
+
+    async def run_with_lease(
+        self,
+        lease: RequestQuotaLease,
+        operation: Callable[[], Awaitable[None]],
+    ) -> None:
+        """Renew throughout the ASGI operation, including response streaming."""
+
+        async def heartbeat() -> None:
+            while True:
+                await asyncio.sleep(self.renewal_interval_seconds)
+                try:
+                    renewed = await run_in_threadpool(self.renew, lease)
+                except Exception as error:
+                    raise RequestQuotaLeaseLostError("Request lease renewal failed") from error
+                if not renewed:
+                    raise RequestQuotaLeaseLostError("Request concurrency lease expired")
+
+        async def run_operation() -> None:
+            await operation()
+
+        work = asyncio.create_task(run_operation())
+        renewal = asyncio.create_task(heartbeat())
+        try:
+            done, _ = await asyncio.wait((work, renewal), return_when=asyncio.FIRST_COMPLETED)
+            if renewal in done:
+                await renewal
+            await work
+        finally:
+            renewal.cancel()
+            work.cancel()
+            await asyncio.gather(renewal, work, return_exceptions=True)
+            await run_in_threadpool(self.release, lease)
+
+    def _release_keys(self, scope_keys: tuple[str, ...], lease_id: str) -> None:
         for scope_key in scope_keys:
             self._repository.release_request_quota(
                 scope_key,
-                window_number,
+                lease_id,
                 self._utc_clock(),
             )
+
+
+class RequestQuotaLeaseLostError(RuntimeError):
+    """Stop admitting work when its concurrency lease cannot be maintained."""

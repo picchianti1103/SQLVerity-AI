@@ -1,6 +1,6 @@
 # Implementation status and known gaps
 
-- **Last updated:** 2026-08-25
+- **Last updated:** 2026-09-11
 - **Tracking rule:** `Blocked` means the current environment lacks a required external capability.
   `Deferred` means the work is feasible but belongs to a later document-aligned increment.
 
@@ -19,19 +19,19 @@
 | SQL generation | Structured `SQLProposal` limited to non-redacted retrieved context and checked against its own AST references; privacy-selectable semantic retry remains bounded to the same governed context and never bypasses validation |
 | Intent interpretation | Every proposal includes a governed intent kind, summary, requested row limit, explained table/column mappings, calibrated confidence, and in-context alternatives; explicit Italian/English preview limits are checked against both interpretation and SQL |
 | Intent correction memory | Data stewards can correct mappings through catalog choices or a free-text follow-up in Query Studio; conversational corrections use governed structured LLM output limited to current-catalog, same-role candidates, require at least 0.75 confidence and no unresolved ambiguity, and otherwise modify no memory. Accepted corrections create or supersede DataSource-scoped confirmed Business Concepts with immutable history, classification propagation, and pending-ticket invalidation when SQL must be regenerated |
-| SQL safety | Registry-routed PostgreSQL/MySQL/MariaDB/Oracle/SQL Server AST parsing, single-query SELECT-only enforcement, read-only CTE/set operations, catalog reference checks, per-dialect function policy, wildcard policy, and dialect-native bounded previews |
+| SQL safety | Registry-routed PostgreSQL/MySQL/MariaDB/Oracle/SQL Server AST parsing, single-query SELECT-only enforcement, read-only CTE/set operations, exact physical catalog identifier binding, explicit schema qualification, unique output names, per-dialect function policy, wildcard policy, and dialect-native bounded previews |
 | Governed generated-query parameters | Structured proposals declare up to 50 named scalar parameters with string/integer/number/boolean/date/datetime/UUID types; AST validation requires exact placeholder/declaration agreement and static preview limits; typed values are driver-bound and SHA-256-bound across EXPLAIN/approval/execution without persisting or auditing raw values |
-| Query lifecycle | Tenant-scoped persisted query tickets, catalog-version binding, explicit approval, execution/failure/completion transitions, and content-minimizing audit events |
+| Query lifecycle | Tenant-scoped persisted query tickets, catalog-version binding, immutable EXPLAIN revisions, conditional approval with independent SQL/parameter digests, execution/failure/completion transitions, and content-minimizing audit events |
 | PostgreSQL execution | Non-`ANALYZE` JSON `EXPLAIN`, transaction read-only mode, server-side statement timeout, row and serialized-byte bounds, result metadata, and active cancellation |
 | MySQL/MariaDB execution | Official vendor-driver integrations, non-`ANALYZE` JSON `EXPLAIN`, read-only transactions, vendor-specific statement timeouts, bounded streaming fetches, and separate-connection `KILL QUERY` cancellation. The MariaDB packaging extra is temporarily withheld pending an upstream security fix. |
 | Oracle execution | Official `python-oracledb` Thin driver, TCPS-by-default secrets, `USER_*` introspection, read-only transactions, per-round-trip call timeout, bounded fetches, `Connection.cancel()`, and rollback-scoped `EXPLAIN PLAN`/`DBMS_XPLAN` output |
 | SQL Server execution | Official `mssql-python` driver, encrypted keyword-argument connections, driver read-only access mode, connection-level query timeout, governed named-to-positional parameter binding, bounded fetches, non-executing SHOWPLAN XML, and validated-SPID separate-connection cancellation |
-| Result processing | Local deterministic summaries for empty/scalar/row/table results, bounded scalar formatting, and no automatic LLM interpretation |
+| Result processing | Duplicate driver output names rejected before row conversion across all five executors; local deterministic summaries for empty/scalar/row/table results, bounded scalar formatting, and no automatic LLM interpretation |
 | Result privacy | Catalog-version classification reload before execution, fail-closed gaps, per-output-column lineage through aliases/expressions/CTEs with selective masking, conservative whole-result fallback for unresolved shapes, and an explicit metadata-only privacy report |
 | Result provenance | SQL, DataSource, catalog version, lineage, concepts, assumptions, approval, planner estimates, execution metadata, and linked LLM usage/cost identifiers |
 | FinOps pricing | Tenant-scoped, effective-dated model pricing with exact decimal arithmetic, cached-token rates, batch discounts, source versions, overlap rejection, and PostgreSQL exclusion constraints |
-| FinOps usage and budgets | Deterministic pre-call and actual cost calculation, currency/pricing provenance, monthly tenant summaries, and fail-closed pre-call budget enforcement |
-| Database cost governance | Per-DataSource `EXPLAIN` requirements plus planner-cost and estimated-row thresholds enforced before approval |
+| FinOps usage and budgets | Deterministic pre-call and actual cost calculation, currency/pricing provenance, monthly tenant summaries, transactional reservations across replicas, atomic usage settlement, and audited reconciliation of uncertain provider charges |
+| Database cost governance | Per-DataSource `EXPLAIN` requirements plus planner-cost and estimated-row thresholds enforced before approval and execution admission; version-bound approval is reopened when the policy changes |
 | Authorized Query DataSource | Immutable versioned base-query definitions exposed as one virtual catalog object, declared output schema and parameters, filtering/aggregation policy, AST wrapping, bound driver parameters, and EXPLAIN/approval binding integrity |
 | Golden evaluation | Versioned 50-question dataset across three realistic domains, reference and external-prediction runner, PostgreSQL AST/lineage/semantic/safety checks, strict thresholds, hash-bound baseline, per-case regression detection, and non-zero CLI gate |
 | Corrected-SQL learning loop | Immutable human correction evidence linked to question, DataSource, catalog version, optional QueryRequest, actor and reason; AST revalidation; explicit revision chains; deterministic similarity retrieval; schema-drift filtering; Context Builder seeding; and classification-aware prompt egress |
@@ -47,9 +47,21 @@
 | Dialect expansion | Central capabilities/alias registry with fail-closed routing; MySQL, MariaDB, Oracle, and SQL Server validation, semantic fragments, DDL/manual import, introspection, execution, EXPLAIN, timeout, cancellation, API wiring, and official drivers |
 | Self-service console | Same-origin responsive English-first Control Plane, Query Studio, and administration view; state-aware Getting Started checklist, contextual explanations and searchable Help drawer; in-memory Bearer or OIDC browser session; tenant/DataSource discovery and creation; federated-principal provisioning; provider policy, connection-test, and background-job controls; opaque secret references; introspection, DDL and manual import; versioned Schema Explorer; visible intent interpretation, ambiguity candidates, conversational correction and explicit catalog override for authorized stewards; typed parameter editor with non-persisted values; governed proposal with maximum-privacy or semantic-retry choice, validation, EXPLAIN, approval, read-only execution, deterministic results, privacy and provenance; strict CSP and no external frontend runtime |
 | Production security controls | Vault KV v2 and AWS Secrets Manager resolvers with fresh resolution for rotation, explicit backend allowlisting, secret-safe failures, an audited non-persisting connection test, deterministic server-side text classification that can only elevate client labels, and fail-closed provider egress policy per tenant/DataSource for purpose, classification, residency, and retention |
-| Capacity and provider resilience | PostgreSQL-coordinated request windows and concurrent leases per user, tenant, and DataSource across replicas; crash-orphaned concurrency resets at the next request window while stale releases cannot affect the new window; `429`/`Retry-After`; bounded transient retry and circuit breaking for REST providers; bounded official-SDK retry configuration for OpenAI; and lease-based durable background jobs with crash recovery, cancellation, bounded retry, and transactionally enqueued cursor-batched semantic inference continuations |
+| Capacity and provider resilience | PostgreSQL-coordinated request windows and concurrent leases per user, tenant, and DataSource across replicas; concurrency leases renew independently of rate windows, expire after worker failure, and reject stale or duplicate releases; `429`/`Retry-After`; bounded transient retry and circuit breaking for REST providers; bounded official-SDK retry configuration for OpenAI; and lease-based durable background jobs with crash recovery, cancellation, bounded retry, and transactionally enqueued cursor-batched semantic inference continuations |
 | Operational readiness | Request IDs; bounded-cardinality Prometheus counters, histograms, and worker gauges; structured content-free request logs; opt-in W3C/OTLP tracing; catalog/worker readiness; Prometheus alert rules and runbook; authorized audit listing and NDJSON export; checksummed backup/restore; isolated restore drills; and confirmation-gated operational retention with append-only run evidence |
 | Live certification harness | Synthetic PostgreSQL fixture spanning the golden domains; opt-in real catalog/introspection/EXPLAIN/read-only execution tests; opt-in minimal real provider calls; reference-result execution accuracy with latency percentiles and failure accounting; bounded HTTP load profiling; manual live certification; and scheduled PostgreSQL restore-drill workflows |
+
+## September review remediation
+
+All eight findings from the September 8 review are implemented across three cycles. The final
+cycle adds permission-filtered `GET /v1/session` discovery for DataSource-scoped users and console
+action availability based on effective permissions. Existing API authorization remains enforced.
+Session, tenant, source, and query generations reject obsolete request successes and failures;
+aborts and operation-owned button state protect schema, privacy, and query workflows. Parameter
+edits invalidate pending review work, and approval locks the bindings in the console.
+
+See [remediation status and compatibility notes](review-remediation-2026-09.md) for the complete
+findings, migrations, regression evidence, and remaining certification scope.
 
 ## Roadmap accounting
 
@@ -71,12 +83,19 @@
 
 ## Latest offline verification
 
-- Pytest: 292 tests, 3 opt-in live tests skipped, and 50 subtests passed.
+- Pytest on September 11: 335 tests and 93 subtests passed; 31 opt-in tests skipped.
+- Separate integrations: 27 PostgreSQL tests and three subtests passed on PostgreSQL 17.11;
+  three browser tests passed on Microsoft Edge with the real local API and synthetic data.
+- Console: 12 deferred-response Node tests passed; CI also runs the browser suite in Chromium.
 - Ruff: all configured checks passed.
-- Strict mypy: 165 source files passed.
+- Strict mypy: 176 source files passed.
 - Golden gate: 50 of 50 cases passed with zero regressions.
 - Dependency integrity, sdist/wheel build with installed build requirements, and Twine metadata
   validation: passed. Hosted CI repeats the build in an isolated environment.
+
+The following evidence comes from the earlier distribution audit and was not repeated during
+the September remediation:
+
 - Docker Compose interpolation with separate catalog/demo credentials: passed on this revision.
   Image build, container health, `/health`, `/ui`, authentication, non-root user, read-only root
   filesystem, and persistent-volume smoke checks passed on the previous audited baseline; the
@@ -99,7 +118,6 @@
 
 | Item | Why it was not implemented | Unblock condition |
 |---|---|---|
-| Live PostgreSQL execution evidence | A PostgreSQL 17 fixture, real integration tests, and manual CI service job are implemented, but this local run had no reachable Docker daemon or approved external DSN, so no live result is claimed. | Run the manual live-certification workflow or provide a disposable PostgreSQL secret reference. |
 | Live MySQL/MariaDB integration fixtures | No reachable disposable MySQL or MariaDB service is available. DDL, driver configuration, introspection, plan parsing, timeout selection, result bounds, and cancellation are covered through AST and injected-connection tests only. | Provide non-production MySQL and MariaDB DSNs/secret references or CI services with read-only test users. |
 | Live Oracle/SQL Server integration fixtures | No reachable disposable Oracle or SQL Server service is available. Catalog permissions, TLS chains, `PLAN_TABLE`/`DBMS_XPLAN`, SHOWPLAN, result types, cancellation permissions, and same-instance routing are covered only at the adapter/protocol level. | Provide non-production Oracle and SQL Server connection references or CI services with least-privilege test users. |
 | Live Ollama model fixture | The adapter and official HTTP contract are tested with an injected client, but no approved local model/runtime is running in this workspace. | Start an approved Ollama model and provide its model id; for a remote private endpoint, also provide HTTPS and any required bearer credential. |

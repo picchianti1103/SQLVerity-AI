@@ -150,7 +150,9 @@ class QueryExecutionServiceTests(unittest.TestCase):
         )
 
         self.assertEqual(8.5, result.estimated_total_cost)
-        self.assertEqual(["SELECT id FROM public.orders LIMIT 2"], self.executor.explain_calls)
+        self.assertEqual(
+            ['SELECT "orders"."id" FROM "public"."orders" LIMIT 2'], self.executor.explain_calls,
+        )
         events = self.repository.audit_events(self.tenant.id)
         explained = next(event for event in events if event.event_type == "query.explained")
         self.assertEqual(8.5, explained.details["estimated_total_cost"])
@@ -405,6 +407,7 @@ class QueryExecutionServiceTests(unittest.TestCase):
             self.tenant.id,
             active.id,
             QueryRequestState.EXECUTING,
+            expected_cost_policy_revision=0,
         )
         cancelled_active = self.service.cancel(
             tenant_id=self.tenant.id,

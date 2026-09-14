@@ -138,11 +138,11 @@ class EnterpriseDialectValidatorTests(unittest.TestCase):
                 intent="data_query",
                 sql='SELECT o."ID" FROM "SALES"."ORDERS" o',
                 dialect="oracle",
-                tables=("sales.orders",),
-                columns=("sales.orders.id",),
+                tables=("SALES.ORDERS",),
+                columns=("SALES.ORDERS.ID",),
             ),
-            allowed_tables=self.allowed_tables,
-            allowed_columns=self.allowed_columns,
+            allowed_tables=frozenset({"SALES.ORDERS"}),
+            allowed_columns=frozenset({"SALES.ORDERS.ID"}),
             max_rows=75,
         )
 

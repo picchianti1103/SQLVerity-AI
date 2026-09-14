@@ -147,3 +147,13 @@ INSERT INTO support.agents VALUES
 INSERT INTO support.satisfaction VALUES
     (401, 4.50, '2026-01-07T08:00:00Z'),
     (402, 3.50, '2026-02-04T08:00:00Z');
+-- Isolated identity fixtures for governed identifier resolution tests.
+CREATE SCHEMA IF NOT EXISTS identity_allowed;
+CREATE SCHEMA IF NOT EXISTS identity_shadow;
+CREATE TABLE IF NOT EXISTS identity_allowed.orders (id integer, "ID" integer);
+CREATE TABLE IF NOT EXISTS identity_allowed."Orders" (id integer);
+CREATE TABLE IF NOT EXISTS identity_shadow.orders (id integer);
+TRUNCATE identity_allowed.orders, identity_allowed."Orders", identity_shadow.orders;
+INSERT INTO identity_allowed.orders VALUES (101, 202);
+INSERT INTO identity_allowed."Orders" VALUES (303);
+INSERT INTO identity_shadow.orders VALUES (999);
