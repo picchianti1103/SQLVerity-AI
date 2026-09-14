@@ -6,6 +6,9 @@ updates:
       interval: weekly
     open-pull-requests-limit: 5
     ignore:
+      # SDK 3 uses HTTPX2; adopt it only with an explicit transport migration.
+      - dependency-name: openai
+        versions: [">=3.0.0"]
       - dependency-name: "*"
         update-types:
           - version-update:semver-major
