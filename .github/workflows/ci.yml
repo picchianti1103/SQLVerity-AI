@@ -52,7 +52,7 @@ jobs:
         run: python -m pytest -q -p no:cacheprovider
 
       - name: Set up Node for console regression tests
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: "22"
 
